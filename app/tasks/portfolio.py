@@ -121,7 +121,7 @@ def rebalance_portfolio(force: bool = False):
         rebalancer = PortfolioRebalancer(api, portfolio_repo, optimizer)
         
         # Execute rebalancing
-         rebalancer.rebalance(PORTFOLIO_SYMBOLS, force=force)
+        rebalancer.rebalance(PORTFOLIO_SYMBOLS, force=force)
         
         logger.info("Portfolio rebalancing complete")
         
