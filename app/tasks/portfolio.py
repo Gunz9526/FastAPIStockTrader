@@ -12,7 +12,7 @@ from app.core.database import SessionLocal
 from app.services.portfolio_optimizer import PortfolioOptimizer
 from app.services.portfolio_rebalancer import PortfolioRebalancer
 from app.repositories.portfolio_repo import PortfolioRepository
-import alpaca_trade_api as tradeapi
+from alpaca.trading.client import TradingClient
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -45,13 +45,13 @@ def update_portfolio_parameters():
         optimizer = PortfolioOptimizer(lookback_days=14, min_live_trades=50)
         
         # Get portfolio value
-        api = tradeapi.REST(
-            settings.ALPACA_API_KEY,
-            settings.ALPACA_SECRET_KEY,
-            settings.ALPACA_TRADING_URL,
-            api_version='v2'
+        is_paper = 'paper' in settings.ALPACA_TRADING_URL.lower()
+        trading_client = TradingClient(
+            api_key=settings.ALPACA_API_KEY,
+            secret_key=settings.ALPACA_SECRET_KEY,
+            paper=is_paper
         )
-        account = api.get_account()
+        account = trading_client.get_account()
         portfolio_value = float(account.portfolio_value)
         
         logger.info(f"Portfolio value: ${portfolio_value:,.2f}")
@@ -111,14 +111,14 @@ def rebalance_portfolio(force: bool = False):
         portfolio_repo = PortfolioRepository(session)
         optimizer = PortfolioOptimizer(lookback_days=14)
         
-        api = tradeapi.REST(
-            settings.ALPACA_API_KEY,
-            settings.ALPACA_SECRET_KEY,
-            settings.ALPACA_TRADING_URL,
-            api_version='v2'
+        is_paper = 'paper' in settings.ALPACA_TRADING_URL.lower()
+        trading_client = TradingClient(
+            api_key=settings.ALPACA_API_KEY,
+            secret_key=settings.ALPACA_SECRET_KEY,
+            paper=is_paper
         )
         
-        rebalancer = PortfolioRebalancer(api, portfolio_repo, optimizer)
+        rebalancer = PortfolioRebalancer(trading_client, portfolio_repo, optimizer)
         
         # Execute rebalancing
         rebalancer.rebalance(PORTFOLIO_SYMBOLS, force=force)

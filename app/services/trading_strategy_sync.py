@@ -1,5 +1,7 @@
 import logging
-import alpaca_trade_api as tradeapi
+from alpaca.trading.client import TradingClient
+from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest
+from alpaca.trading.enums import OrderSide, TimeInForce
 from app.core.config import settings
 from datetime import datetime
 from app.core.database import SessionLocal
@@ -37,13 +39,14 @@ class SyncTradingStrategy:
         
         # Initialize Alpaca API
         try:
-            self.api = tradeapi.REST(
-                settings.ALPACA_API_KEY,
-                settings.ALPACA_SECRET_KEY,
-                settings.ALPACA_TRADING_URL,
-                api_version='v2'
+            # Determine if using paper trading based on URL
+            is_paper = 'paper' in settings.ALPACA_TRADING_URL.lower()
+            self.api = TradingClient(
+                api_key=settings.ALPACA_API_KEY,
+                secret_key=settings.ALPACA_SECRET_KEY,
+                paper=is_paper
             )
-            logger.info("✅ Alpaca API connected")
+            logger.info("Alpaca API connected (Paper: {is_paper})")
         except Exception as e:
             logger.error(f"Failed to connect to Alpaca: {e}")
             self.api = None
@@ -87,7 +90,7 @@ class SyncTradingStrategy:
             regime = self.regime_detector.detect_regime(features_df)
             self.current_regime = regime
             
-            logger.info(f"📊 Market Regime: {regime.value.upper()}")
+            logger.info(f"Market Regime: {regime.value.upper()}")
             
         except Exception as e:
             logger.error(f"Regime detection error: {e}", exc_info=True)
@@ -158,7 +161,7 @@ class SyncTradingStrategy:
         buy_threshold = 0.002  
         sell_threshold = -0.002
         
-        logger.info(f"🔮 {symbol} [15m] Pred: {prediction:.5f} | Price: {current_price}")
+        logger.info(f"{symbol} [15m] Pred: {prediction:.5f} | Price: {current_price}")
         
         if self.api is None:
             logger.warning("Alpaca API not initialized, skipping trade")
@@ -169,10 +172,10 @@ class SyncTradingStrategy:
             # Phase I.1: Check cooldown period
             can_enter, reason = self.risk_manager.can_enter_position(symbol)
             if not can_enter:
-                logger.info(f"⛔ {symbol} BUY blocked: {reason}")
+                logger.info(f"{symbol} BUY blocked: {reason}")
                 return
             
-            logger.info(f"✅ {symbol} BUY allowed: {reason}")
+            logger.info(f"{symbol} BUY allowed: {reason}")
             self._place_order(symbol, "buy", "limit", current_price)
             
         elif prediction < sell_threshold:
@@ -190,25 +193,32 @@ class SyncTradingStrategy:
                     )
                     
                     if not can_exit:
-                        logger.info(f"⛔ {symbol} SELL blocked: {reason}")
+                        logger.info(f"{symbol} SELL blocked: {reason}")
                         return
                     
-                    logger.info(f"✅ {symbol} SELL allowed: {reason}")
+                    logger.info(f"{symbol} SELL allowed: {reason}")
                 
                 self._place_order(symbol, "sell", "market", current_price)
             else:
                 logger.debug(f"{symbol}: Skip SELL (No position)")
 
     def _has_position(self, symbol: str) -> bool:
+        """Check if position exists for symbol."""
         try:
-            self.api.get_position(symbol)
+            self.api.get_open_position(symbol)
             return True
-        except:
+        except Exception:
             return False
 
     def _place_order(self, symbol: str, side: str, order_type: str, price: float):
         """
-        Place real order via Alpaca API.
+        Place real order via Alpaca API using alpaca-py.
+        
+        Args:
+            symbol: Stock symbol
+            side: 'buy' or 'sell'
+            order_type: 'market' or 'limit'
+            price: Current price (used for limit orders and buying power check)
         """
         try:
             qty = 1  # Fixed quantity for safety
@@ -220,17 +230,29 @@ class SyncTradingStrategy:
                     logger.warning(f"Insufficient buying power for {symbol}")
                     return
 
-            # Place order
-            order = self.api.submit_order(
-                symbol=symbol,
-                qty=qty,
-                side=side,
-                type=order_type,
-                time_in_force='day',
-                limit_price=price if order_type == 'limit' else None
-            )
+            # Create order request object
+            order_side = OrderSide.BUY if side == "buy" else OrderSide.SELL
             
-            logger.info(f"🚀 ORDER PLACED: {side.upper()} {symbol} (ID: {order.id})")
+            if order_type == 'market':
+                order_data = MarketOrderRequest(
+                    symbol=symbol,
+                    qty=qty,
+                    side=order_side,
+                    time_in_force=TimeInForce.DAY
+                )
+            else:
+                order_data = LimitOrderRequest(
+                    symbol=symbol,
+                    qty=qty,
+                    side=order_side,
+                    time_in_force=TimeInForce.DAY,
+                    limit_price=price
+                )
+            
+            # Submit order
+            order = self.api.submit_order(order_data=order_data)
+            
+            logger.info(f"ORDER PLACED: {side.upper()} {symbol} (ID: {order.id})")
             
             # Phase I.1: Record position entry/exit in DB
             if side == "buy":
@@ -247,7 +269,7 @@ class SyncTradingStrategy:
                     self.db.commit()
             
         except Exception as e:
-            logger.error(f"❌ Order failed for {symbol}: {e}") 
+            logger.error(f"❌ Order failed for {symbol}: {e}", exc_info=True) 
     
     async def process_portfolio(self, symbols: List[str]):
         """
@@ -264,7 +286,7 @@ class SyncTradingStrategy:
             symbols: List of symbols to analyze
         """
         try:
-            logger.info(f"🔄 Processing portfolio with {len(symbols)} symbols")
+            logger.info(f"Processing portfolio with {len(symbols)} symbols")
             
             # 1. Detect market regime
             self.detect_market_regime()
@@ -363,7 +385,7 @@ class SyncTradingStrategy:
                     # New position - check for BUY
                     await self._process_buy_signal(symbol, signal_data, portfolio_value)
             
-            logger.info("✅ Portfolio processing complete")
+            logger.info("Portfolio processing complete")
             
         except Exception as e:
             logger.error(f"Portfolio processing error: {e}", exc_info=True)
@@ -425,7 +447,7 @@ class SyncTradingStrategy:
             # Check cooldown
             can_enter, reason = self.risk_manager.can_enter_position(symbol)
             if not can_enter:
-                logger.info(f"⛔ {symbol} BUY blocked: {reason}")
+                logger.info(f"{symbol} BUY blocked: {reason}")
                 return
             
             # Calculate position size using Kelly
@@ -435,21 +457,21 @@ class SyncTradingStrategy:
             qty = int(position_value / current_price)
             
             if qty < 1:
-                logger.info(f"⏩ {symbol} BUY skipped: Kelly size too small ({kelly_fraction:.2%})")
+                logger.info(f"{symbol} BUY skipped: Kelly size too small ({kelly_fraction:.2%})")
                 return
             
-            logger.info(f"✅ {symbol} BUY: {qty} shares @ ${current_price:.2f} (Kelly: {kelly_fraction:.2%})")
+            logger.info(f"{symbol} BUY: {qty} shares @ ${current_price:.2f} (Kelly: {kelly_fraction:.2%})")
             
-            # Place order
-            order = self.api.submit_order(
+            # Place order using alpaca-py
+            order_data = MarketOrderRequest(
                 symbol=symbol,
                 qty=qty,
-                side='buy',
-                type='market',
-                time_in_force='day'
+                side=OrderSide.BUY,
+                time_in_force=TimeInForce.DAY
             )
+            order = self.api.submit_order(order_data=order_data)
             
-            logger.info(f"🚀 ORDER PLACED: BUY {symbol} (ID: {order.id})")
+            logger.info(f"ORDER PLACED: BUY {symbol} (ID: {order.id})")
             
             # Record in DB
             entry_time = datetime.now()
@@ -480,22 +502,22 @@ class SyncTradingStrategy:
             
             if not can_exit and signal_data['signal'] >= -0.002:
                 # Weak SELL signal + defense blocked
-                logger.info(f"⛔ {symbol} SELL blocked: {reason}")
+                logger.info(f"{symbol} SELL blocked: {reason}")
                 return
             
-            logger.info(f"✅ {symbol} SELL allowed: {reason}")
+            logger.info(f"{symbol} SELL allowed: {reason}")
             
-            # Place order
+            # Place order using alpaca-py
             qty = active_position.quantity
-            order = self.api.submit_order(
+            order_data = MarketOrderRequest(
                 symbol=symbol,
                 qty=qty,
-                side='sell',
-                type='market',
-                time_in_force='day'
+                side=OrderSide.SELL,
+                time_in_force=TimeInForce.DAY
             )
+            order = self.api.submit_order(order_data=order_data)
             
-            logger.info(f"🚀 ORDER PLACED: SELL {symbol} (ID: {order.id})")
+            logger.info(f"ORDER PLACED: SELL {symbol} (ID: {order.id})")
             
             # Update DB
             self.repo.update_position_exit(active_position.id, current_price)
