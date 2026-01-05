@@ -12,7 +12,7 @@ import pandas as pd
 from sqlalchemy import select, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.models.stock import PositionTracking, OHLCV15m
+from app.domain.models.stock import PositionTracking, StockOHLCV
 
 logger = logging.getLogger(__name__)
 
@@ -239,16 +239,16 @@ class PortfolioRepository:
             List of OHLCV objects
         """
         try:
-            # Note: This assumes OHLCV15m model exists
+            # Note: This assumes StockOHLCV model exists
             # For '1d' timeframe, you would use a different model
             
-            query = select(OHLCV15m).where(
+            query = select(StockOHLCV).where(
                 and_(
-                    OHLCV15m.symbol == symbol,
-                    OHLCV15m.date_time >= start_date,
-                    OHLCV15m.date_time <= end_date
+                    StockOHLCV.symbol == symbol,
+                    StockOHLCV.date_time >= start_date,
+                    StockOHLCV.date_time <= end_date
                 )
-            ).order_by(OHLCV15m.date_time.asc())
+            ).order_by(StockOHLCV.date_time.asc())
             
             result = await self.session.execute(query)
             bars = result.scalars().all()
