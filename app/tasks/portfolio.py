@@ -36,7 +36,7 @@ def update_portfolio_parameters():
     
     Auto-switches from backtest to live data when sufficient trades exist.
     """
-    logger.info("🔄 Starting daily portfolio parameter update")
+    logger.info("Starting daily portfolio parameter update")
     
     session = SessionLocal()
     try:
@@ -57,32 +57,32 @@ def update_portfolio_parameters():
         logger.info(f"Portfolio value: ${portfolio_value:,.2f}")
         
         # 1. Update correlation matrix
-        corr_matrix = await optimizer.calculate_correlation_matrix(
+        corr_matrix = optimizer.calculate_correlation_matrix(
             portfolio_repo,
             PORTFOLIO_SYMBOLS,
             use_live_data=True
         )
-        logger.info(f"✅ Correlation matrix updated ({corr_matrix.shape})")
+        logger.info(f"Correlation matrix updated ({corr_matrix.shape})")
         
         # 2. Update VaR
-        var = await optimizer.calculate_var(
+        var = optimizer.calculate_var(
             portfolio_repo,
             portfolio_value,
             confidence=0.95,
             use_live_data=True
         )
-        logger.info(f"✅ VaR (95%) updated: ${var:,.2f}")
+        logger.info(f"VaR (95%) updated: ${var:,.2f}")
         
         # 3. Update Kelly sizes
         for symbol in PORTFOLIO_SYMBOLS:
-            kelly = await optimizer.kelly_criterion(
+            kelly = optimizer.kelly_criterion(
                 portfolio_repo,
                 symbol,
                 use_live_data=True
             )
-            logger.info(f"✅ {symbol} Kelly: {kelly:.2%}")
+            logger.info(f"{symbol} Kelly: {kelly:.2%}")
         
-        logger.info("✅ Portfolio parameters updated successfully")
+        logger.info("Portfolio parameters updated successfully")
         
     except Exception as e:
         logger.error(f"❌ Parameter update failed: {e}", exc_info=True)
@@ -103,7 +103,7 @@ def rebalance_portfolio(force: bool = False):
     Args:
         force: If True, rebalance regardless of drift
     """
-    logger.info("🔄 Starting daily portfolio rebalancing")
+    logger.info("Starting daily portfolio rebalancing")
     
     session = SessionLocal()
     try:
@@ -121,9 +121,9 @@ def rebalance_portfolio(force: bool = False):
         rebalancer = PortfolioRebalancer(api, portfolio_repo, optimizer)
         
         # Execute rebalancing
-        await rebalancer.rebalance(PORTFOLIO_SYMBOLS, force=force)
+         rebalancer.rebalance(PORTFOLIO_SYMBOLS, force=force)
         
-        logger.info("✅ Portfolio rebalancing complete")
+        logger.info("Portfolio rebalancing complete")
         
     except Exception as e:
         logger.error(f"❌ Rebalancing failed: {e}", exc_info=True)
