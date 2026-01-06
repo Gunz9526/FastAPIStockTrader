@@ -39,7 +39,7 @@ class PortfolioOptimizer:
         self.min_live_trades = min_live_trades
         self.cache_ttl = 86400  # 24 hours
     
-    async def calculate_correlation_matrix(
+    def calculate_correlation_matrix(
         self,
         repo,
         symbols: List[str],
@@ -63,31 +63,31 @@ class PortfolioOptimizer:
         try:
             # Check cache first
             cache_key = f"corr_matrix:{datetime.now().date()}"
-            cached = await cache.get(cache_key)
+            cached = cache.get(cache_key) if cache else None
             if cached:
-                logger.info("✅ Correlation matrix loaded from cache")
+                logger.info("Correlation matrix loaded from cache")
                 return pd.read_json(cached)
             
             # Decide data source
             if use_live_data:
-                live_trade_count = await repo.count_live_trades(days=self.lookback_days)
+                live_trade_count = repo.count_live_trades(days=self.lookback_days)
                 use_live = live_trade_count >= self.min_live_trades
             else:
                 use_live = False
             
             if use_live:
-                logger.info(f"✅ Using LIVE trade data ({live_trade_count} trades)")
-                returns_data = await self._get_live_returns(repo, symbols)
+                logger.info(f"??Using LIVE trade data ({live_trade_count} trades)")
+                returns_data = self._get_live_returns(repo, symbols)
             else:
-                logger.warning(f"⚠️ Using BACKTEST data (live trades: {live_trade_count}/{self.min_live_trades})")
-                returns_data = await self._get_backtest_returns(repo, symbols)
+                logger.warning(f"?�️ Using BACKTEST data (live trades: {live_trade_count}/{self.min_live_trades})")
+                returns_data = self._get_backtest_returns(repo, symbols)
             
             # Calculate correlation
             df_returns = pd.DataFrame(returns_data)
             corr_matrix = df_returns.corr()
             
             # Cache for 24 hours
-            await cache.set(cache_key, corr_matrix.to_json(), ttl=self.cache_ttl)
+            cache.set(cache_key, corr_matrix.to_json(), ttl=self.cache_ttl)
             
             logger.info(f"Correlation matrix calculated:\n{corr_matrix}")
             return corr_matrix
@@ -97,14 +97,14 @@ class PortfolioOptimizer:
             # Return identity matrix as fallback (no correlation)
             return pd.DataFrame(np.eye(len(symbols)), index=symbols, columns=symbols)
     
-    async def _get_live_returns(self, repo, symbols: List[str]) -> Dict[str, np.ndarray]:
+    def _get_live_returns(self, repo, symbols: List[str]) -> Dict[str, np.ndarray]:
         """Get returns from live trading data (position_tracking table)."""
         returns_data = {}
         end_date = datetime.now()
         start_date = end_date - timedelta(days=self.lookback_days)
         
         for symbol in symbols:
-            trades = await repo.get_trade_history(symbol, start_date, end_date)
+            trades = repo.get_trade_history(symbol, start_date, end_date)
             if len(trades) > 0:
                 # Calculate returns: (exit_price - entry_price) / entry_price
                 returns = [(t['exit_price'] - t['entry_price']) / t['entry_price'] 
@@ -116,14 +116,14 @@ class PortfolioOptimizer:
         
         return returns_data
     
-    async def _get_backtest_returns(self, repo, symbols: List[str]) -> Dict[str, np.ndarray]:
+    def _get_backtest_returns(self, repo, symbols: List[str]) -> Dict[str, np.ndarray]:
         """Get returns from historical OHLCV data (backtest)."""
         returns_data = {}
         end_date = datetime.now()
         start_date = end_date - timedelta(days=self.lookback_days)
         
         for symbol in symbols:
-            ohlcv = await repo.get_ohlcv_range(symbol, start_date, end_date, timeframe='15m')
+            ohlcv = repo.get_ohlcv_range(symbol, start_date, end_date, timeframe='15m')
             if len(ohlcv) > 0:
                 df = pd.DataFrame([{
                     'close': bar.close
@@ -135,7 +135,7 @@ class PortfolioOptimizer:
         
         return returns_data
     
-    async def calculate_var(
+    def calculate_var(
         self,
         repo,
         portfolio_value: float,
@@ -159,31 +159,31 @@ class PortfolioOptimizer:
         try:
             # Check cache
             cache_key = f"var:{datetime.now().date()}:{confidence}"
-            cached = await cache.get(cache_key)
+            cached = cache.get(cache_key)
             if cached:
-                logger.info("✅ VaR loaded from cache")
+                logger.info("??VaR loaded from cache")
                 return float(cached)
             
             # Get daily P&L data
             if use_live_data:
-                daily_returns = await repo.get_daily_pnl(days=self.lookback_days)
+                daily_returns = repo.get_daily_pnl(days=self.lookback_days)
                 if len(daily_returns) >= 7:  # At least 1 week
-                    logger.info(f"✅ VaR using LIVE data ({len(daily_returns)} days)")
+                    logger.info(f"??VaR using LIVE data ({len(daily_returns)} days)")
                     returns = daily_returns['daily_return'].values
                 else:
-                    logger.warning(f"⚠️ VaR using BACKTEST data (live days: {len(daily_returns)})")
-                    returns = await self._get_backtest_portfolio_returns(repo)
+                    logger.warning(f"?�️ VaR using BACKTEST data (live days: {len(daily_returns)})")
+                    returns = self._get_backtest_portfolio_returns(repo)
             else:
-                returns = await self._get_backtest_portfolio_returns(repo)
+                returns = self._get_backtest_portfolio_returns(repo)
             
             # Calculate VaR (percentile method)
             var_percentile = np.percentile(returns, (1 - confidence) * 100)
             var_amount = portfolio_value * var_percentile
             
             # Cache for 24 hours
-            await cache.set(cache_key, str(var_amount), ttl=self.cache_ttl)
+            cache.set(cache_key, str(var_amount), ttl=self.cache_ttl)
             
-            logger.info(f"📊 VaR ({confidence:.0%}): ${var_amount:,.2f} (Portfolio: ${portfolio_value:,.0f})")
+            logger.info(f"?�� VaR ({confidence:.0%}): ${var_amount:,.2f} (Portfolio: ${portfolio_value:,.0f})")
             return var_amount
             
         except Exception as e:
@@ -191,13 +191,13 @@ class PortfolioOptimizer:
             # Conservative fallback: assume -3% daily risk
             return portfolio_value * -0.03
     
-    async def _get_backtest_portfolio_returns(self, repo) -> np.ndarray:
+    def _get_backtest_portfolio_returns(self, repo) -> np.ndarray:
         """Get portfolio returns from backtest data."""
         # Simplified: Use SPY as market proxy
         end_date = datetime.now()
         start_date = end_date - timedelta(days=self.lookback_days)
         
-        spy_data = await repo.get_ohlcv_range('SPY', start_date, end_date, timeframe='1d')
+        spy_data = repo.get_ohlcv_range('SPY', start_date, end_date, timeframe='1d')
         if len(spy_data) > 0:
             df = pd.DataFrame([{'close': bar.close} for bar in spy_data])
             returns = df['close'].pct_change().dropna().values
@@ -206,7 +206,7 @@ class PortfolioOptimizer:
             # Fallback: neutral returns
             return np.array([0.0] * 14)
     
-    async def kelly_criterion(
+    def kelly_criterion(
         self,
         repo,
         symbol: str,
@@ -233,9 +233,9 @@ class PortfolioOptimizer:
         try:
             # Check cache
             cache_key = f"kelly:{symbol}:{datetime.now().date()}"
-            cached = await cache.get(cache_key)
+            cached = cache.get(cache_key)
             if cached:
-                logger.info(f"✅ Kelly for {symbol} loaded from cache")
+                logger.info(f"??Kelly for {symbol} loaded from cache")
                 return float(cached)
             
             # Get trade history
@@ -243,14 +243,14 @@ class PortfolioOptimizer:
             start_date = end_date - timedelta(days=self.lookback_days)
             
             if use_live_data:
-                trades = await repo.get_trade_history(symbol, start_date, end_date)
+                trades = repo.get_trade_history(symbol, start_date, end_date)
                 if len(trades) >= 10:  # Minimum 10 trades for reliability
-                    logger.info(f"✅ Kelly using LIVE data ({len(trades)} trades)")
+                    logger.info(f"??Kelly using LIVE data ({len(trades)} trades)")
                 else:
-                    logger.warning(f"⚠️ Kelly using BACKTEST data (live trades: {len(trades)})")
-                    trades = await self._get_backtest_trades(repo, symbol)
+                    logger.warning(f"?�️ Kelly using BACKTEST data (live trades: {len(trades)})")
+                    trades = self._get_backtest_trades(repo, symbol)
             else:
-                trades = await self._get_backtest_trades(repo, symbol)
+                trades = self._get_backtest_trades(repo, symbol)
             
             if len(trades) < 5:
                 logger.warning(f"{symbol}: Insufficient trade history, using conservative 10%")
@@ -274,7 +274,7 @@ class PortfolioOptimizer:
             kelly_safe = max(0, min(kelly * kelly_fraction, 0.30))
             
             # Cache for 24 hours
-            await cache.set(cache_key, str(kelly_safe), ttl=self.cache_ttl)
+            cache.set(cache_key, str(kelly_safe), ttl=self.cache_ttl)
             
             logger.info(
                 f"{symbol} Kelly: {kelly_safe:.2%} "
@@ -286,14 +286,14 @@ class PortfolioOptimizer:
             logger.error(f"Kelly calculation failed for {symbol}: {e}", exc_info=True)
             return 0.10  # Conservative fallback
     
-    async def _get_backtest_trades(self, repo, symbol: str) -> List[Dict]:
+    def _get_backtest_trades(self, repo, symbol: str) -> List[Dict]:
         """Simulate trades from backtest data (mock for initial period)."""
         # Simplified: Generate mock trades based on historical returns
         # In production, this would use actual backtest results
         end_date = datetime.now()
         start_date = end_date - timedelta(days=self.lookback_days)
         
-        ohlcv = await repo.get_ohlcv_range(symbol, start_date, end_date, timeframe='15m')
+        ohlcv = repo.get_ohlcv_range(symbol, start_date, end_date, timeframe='15m')
         if len(ohlcv) < 10:
             return []
         
@@ -311,7 +311,7 @@ class PortfolioOptimizer:
         
         return trades
     
-    async def optimize_weights(
+    def optimize_weights(
         self,
         repo,
         symbols: List[str],
@@ -335,7 +335,7 @@ class PortfolioOptimizer:
         """
         try:
             # Get correlation matrix and returns
-            corr_matrix = await self.calculate_correlation_matrix(repo, symbols)
+            corr_matrix = self.calculate_correlation_matrix(repo, symbols)
             
             # Mean returns (simplified: use backtest data)
             end_date = datetime.now()
@@ -343,7 +343,7 @@ class PortfolioOptimizer:
             
             mean_returns = {}
             for symbol in symbols:
-                ohlcv = await repo.get_ohlcv_range(symbol, start_date, end_date, timeframe='15m')
+                ohlcv = repo.get_ohlcv_range(symbol, start_date, end_date, timeframe='15m')
                 if len(ohlcv) > 0:
                     df = pd.DataFrame([{'close': bar.close} for bar in ohlcv])
                     returns = df['close'].pct_change().dropna()
@@ -381,7 +381,7 @@ class PortfolioOptimizer:
             
             if result.success:
                 weights_dict = {symbols[i]: result.x[i] for i in range(n_assets)}
-                logger.info(f"✅ MPT Optimized weights: {weights_dict}")
+                logger.info(f"??MPT Optimized weights: {weights_dict}")
                 return weights_dict
             else:
                 logger.warning("MPT optimization failed, using equal weights")

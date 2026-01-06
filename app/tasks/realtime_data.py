@@ -15,7 +15,7 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-@celery_app.task(name="app.tasks.data_tasks.collect_15m_realtime")
+@celery_app.task(name="app.tasks.realtime_data.collect_15m_realtime")
 def collect_15m_realtime():
     """
     Collect 15-minute OHLCV + VWAP data in real-time.

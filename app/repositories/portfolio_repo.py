@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 import pandas as pd
 from sqlalchemy import select, func, and_
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
 
 from app.domain.models.stock import PositionTracking, StockOHLCV
 
@@ -28,10 +28,10 @@ class PortfolioRepository:
     - Live trade counting
     """
     
-    def __init__(self, session: AsyncSession):
+    def __init__(self, session: Session):
         self.session = session
     
-    async def get_daily_pnl(self, days: int = 14) -> pd.DataFrame:
+    def get_daily_pnl(self, days: int = 14) -> pd.DataFrame:
         """
         Get daily portfolio P&L for the last N days.
         
@@ -67,7 +67,7 @@ class PortfolioRepository:
                 func.date(PositionTracking.exit_time).desc()
             )
             
-            result = await self.session.execute(query)
+            result = self.session.execute(query)
             rows = result.all()
             
             if not rows:
@@ -86,7 +86,7 @@ class PortfolioRepository:
             logger.error(f"Failed to get daily P&L: {e}", exc_info=True)
             return pd.DataFrame(columns=['date', 'daily_return'])
     
-    async def get_trade_history(
+    def get_trade_history(
         self,
         symbol: str,
         start_date: datetime,
@@ -127,7 +127,7 @@ class PortfolioRepository:
                 )
             ).order_by(PositionTracking.exit_time.desc())
             
-            result = await self.session.execute(query)
+            result = self.session.execute(query)
             positions = result.scalars().all()
             
             trades = []
@@ -149,7 +149,7 @@ class PortfolioRepository:
             logger.error(f"Failed to get trade history for {symbol}: {e}", exc_info=True)
             return []
     
-    async def count_live_trades(self, days: int = 14) -> int:
+    def count_live_trades(self, days: int = 14) -> int:
         """
         Count number of completed trades in the last N days.
         
@@ -171,7 +171,7 @@ class PortfolioRepository:
                 )
             )
             
-            result = await self.session.execute(query)
+            result = self.session.execute(query)
             count = result.scalar()
             
             logger.info(f"Live trades in last {days} days: {count}")
@@ -181,7 +181,7 @@ class PortfolioRepository:
             logger.error(f"Failed to count live trades: {e}", exc_info=True)
             return 0
     
-    async def get_all_active_positions(self) -> List[Dict]:
+    def get_all_active_positions(self) -> List[Dict]:
         """
         Get all currently active positions (exit_time IS NULL).
         
@@ -199,7 +199,7 @@ class PortfolioRepository:
                 PositionTracking.exit_time.is_(None)
             ).order_by(PositionTracking.entry_time.desc())
             
-            result = await self.session.execute(query)
+            result = self.session.execute(query)
             positions = result.scalars().all()
             
             active = []
@@ -219,7 +219,7 @@ class PortfolioRepository:
             logger.error(f"Failed to get active positions: {e}", exc_info=True)
             return []
     
-    async def get_ohlcv_range(
+    def get_ohlcv_range(
         self,
         symbol: str,
         start_date: datetime,
@@ -250,7 +250,7 @@ class PortfolioRepository:
                 )
             ).order_by(StockOHLCV.date_time.asc())
             
-            result = await self.session.execute(query)
+            result = self.session.execute(query)
             bars = result.scalars().all()
             
             logger.info(f"Retrieved {len(bars)} {timeframe} bars for {symbol}")
@@ -260,7 +260,7 @@ class PortfolioRepository:
             logger.error(f"Failed to get OHLCV for {symbol}: {e}", exc_info=True)
             return []
     
-    async def get_portfolio_value(self) -> float:
+    def get_portfolio_value(self) -> float:
         """
         Calculate total portfolio value (via Alpaca API wrapper).
         

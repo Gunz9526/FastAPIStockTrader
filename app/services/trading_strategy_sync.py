@@ -271,7 +271,7 @@ class SyncTradingStrategy:
         except Exception as e:
             logger.error(f"❌ Order failed for {symbol}: {e}", exc_info=True) 
     
-    async def process_portfolio(self, symbols: List[str]):
+    def process_portfolio(self, symbols: List[str]):
         """
         Process multiple symbols for multi-position portfolio trading (Phase I.2).
         
@@ -292,7 +292,7 @@ class SyncTradingStrategy:
             self.detect_market_regime()
             
             # 2. Get current active positions
-            active_positions = await self.portfolio_repo.get_all_active_positions()
+            active_positions = self.portfolio_repo.get_all_active_positions()
             active_symbols = {pos['symbol'] for pos in active_positions}
             
             logger.info(f"Active positions: {len(active_positions)} / {self.max_positions}")
@@ -303,7 +303,7 @@ class SyncTradingStrategy:
             buying_power = float(account.buying_power)
             
             # 4. Calculate correlation matrix and Kelly sizes
-            corr_matrix = await self.optimizer.calculate_correlation_matrix(
+            corr_matrix = self.optimizer.calculate_correlation_matrix(
                 self.portfolio_repo, 
                 symbols, 
                 use_live_data=True
@@ -344,7 +344,7 @@ class SyncTradingStrategy:
                     prediction = self.predictor.predict_next(X_norm, regime=self.current_regime)
                     
                     # Calculate Kelly position size
-                    kelly_size = await self.optimizer.kelly_criterion(
+                    kelly_size = self.optimizer.kelly_criterion(
                         self.portfolio_repo,
                         symbol,
                         use_live_data=True
@@ -380,10 +380,10 @@ class SyncTradingStrategy:
                 
                 if symbol in active_symbols:
                     # Already have position - check for SELL
-                    await self._process_sell_signal(symbol, signal_data)
+                    self._process_sell_signal(symbol, signal_data)
                 elif symbol in selected_symbols and len(active_positions) < self.max_positions:
                     # New position - check for BUY
-                    await self._process_buy_signal(symbol, signal_data, portfolio_value)
+                    self._process_buy_signal(symbol, signal_data, portfolio_value)
             
             logger.info("Portfolio processing complete")
             
@@ -441,7 +441,7 @@ class SyncTradingStrategy:
         
         return selected
     
-    async def _process_buy_signal(self, symbol: str, signal_data: Dict, portfolio_value: float):
+    def _process_buy_signal(self, symbol: str, signal_data: Dict, portfolio_value: float):
         """Process BUY signal with Kelly position sizing."""
         try:
             # Check cooldown
@@ -482,7 +482,7 @@ class SyncTradingStrategy:
         except Exception as e:
             logger.error(f"BUY order failed for {symbol}: {e}")
     
-    async def _process_sell_signal(self, symbol: str, signal_data: Dict):
+    def _process_sell_signal(self, symbol: str, signal_data: Dict):
         """Process SELL signal with defense checks."""
         try:
             # Get active position
