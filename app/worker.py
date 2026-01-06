@@ -18,10 +18,10 @@ celery_app = Celery(
         "app.tasks.trading",
         "app.tasks.market_analysis",
         "app.tasks.data_tasks",
-        "app.tasks.realtime_data",  # Phase G: 15m real-time collection
-        "app.tasks.portfolio",  # Phase I.2: Portfolio management
-        "app.tasks.sentiment",  # Phase F.1: Sentiment analysis
-        "app.tasks.vix_data",  # Phase F.3: VIX data collection
+        "app.tasks.realtime_data",
+        "app.tasks.portfolio",
+        "app.tasks.sentiment",
+        "app.tasks.vix_data",
     ]
 )
 
@@ -35,7 +35,7 @@ celery_app.conf.update(
     accept_content=["json"],
     result_serializer="json",
     timezone="America/New_York",
-    enable_utc=True,
+    enable_utc=False,
     broker_connection_retry_on_startup=True,
 )
 
@@ -83,14 +83,14 @@ celery_app.conf.beat_schedule = {
     # [Phase F.1] Hourly Sentiment Analysis Update (Every hour, 24/7)
     # Fetches news from API, analyzes with Gemini, caches in Redis
     "update_sentiment_scores": {
-        "task": "tasks.update_sentiment_scores",
-        "schedule": crontab(minute="0", hour="*"),  # Every hour
+        "task": "app.tasks.sentiment.update_sentiment_scores",
+        "schedule": crontab(minute="30", hour="9-15", day_of_week="1-5"),
     },
     
     # [Phase F.1] Daily Sentiment Cache Cleanup (Midnight EST)
     # Optional: Redis TTL handles expiration automatically
     "clear_stale_sentiment_cache": {
-        "task": "tasks.clear_stale_sentiment_cache",
+        "task": "app.tasks.sentiment.clear_stale_sentiment_cache",
         "schedule": crontab(minute="0", hour="0"),  # Daily at midnight
     },
     
@@ -103,7 +103,7 @@ celery_app.conf.beat_schedule = {
     # [Phase F.3] Daily VIX Collection (6:30 AM EST before market open)
     # Fetch VIX (Volatility Index) for regime detection enhancement
     "collect_vix_data": {
-        "task": "tasks.collect_vix_data",
+        "task": "app.tasks.vix_data.collect_vix_data",
         "schedule": crontab(minute="30", hour="6", day_of_week="1-6"),
     },
     

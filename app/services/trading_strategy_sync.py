@@ -32,7 +32,6 @@ class SyncTradingStrategy:
         self.regime_detector = RegimeDetector()  # Phase H: Regime detection
         self.current_regime = MarketRegime.SIDEWAYS_CALM  # Default
         
-        # Phase F: Sentiment & Fundamentals (거래 신호 보강용)
         try:
             from app.services.sentiment_analyzer import get_sentiment_analyzer
             from app.services.fundamental_provider import get_fundamental_provider
@@ -44,12 +43,10 @@ class SyncTradingStrategy:
             self.sentiment_analyzer = None
             self.fundamental_provider = None
         
-        # Phase I.2: Portfolio optimization
         self.optimizer = PortfolioOptimizer(lookback_days=14, min_live_trades=50)
         self.max_positions = 5  # Max 5 concurrent positions
         self.multi_position_mode = True  # Enable multi-position trading
         
-        # Phase F: Adaptive weights (자동 조절)
         self.sentiment_weight = 0.15  # Sentiment 영향도 15%
         self.fundamentals_weight = 0.10  # Fundamentals 영향도 10%
         self.ml_prediction_weight = 0.75  # ML 예측 영향도 75%
@@ -71,6 +68,7 @@ class SyncTradingStrategy:
     def detect_market_regime(self):
         """
         Detect current market regime using SPY data.
+        Phase F.3: Enhanced with VIX integration.
         Updates self.current_regime.
         """
         try:
@@ -103,8 +101,19 @@ class SyncTradingStrategy:
                 logger.warning("Failed to generate SPY features for regime detection")
                 return
             
-            # Detect regime
-            regime = self.regime_detector.detect_regime(features_df)
+            # Phase F.3: Get VIX value from Redis cache
+            vix_value = None
+            try:
+                from app.core.cache import cache
+                vix_str = cache.get('vix:latest')
+                if vix_str:
+                    vix_value = float(vix_str)
+                    logger.info(f"VIX value from cache: {vix_value:.2f}")
+            except Exception as e:
+                logger.debug(f"Could not fetch VIX from cache: {e}")
+            
+            # Detect regime with VIX enhancement
+            regime = self.regime_detector.detect_regime(features_df, vix_value=vix_value)
             self.current_regime = regime
             
             logger.info(f"Market Regime: {regime.value.upper()}")

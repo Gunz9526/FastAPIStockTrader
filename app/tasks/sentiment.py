@@ -2,7 +2,8 @@
 Sentiment Analysis Celery Tasks
 Phase F.1: Automated sentiment analysis updates
 """
-from celery import shared_task
+
+from app.worker import celery_app
 from celery.utils.log import get_task_logger
 from app.core.database import get_sync_session
 from app.repositories.stock_repo_sync import SyncStockRepository
@@ -13,7 +14,7 @@ import logging
 logger = get_task_logger(__name__)
 
 
-@shared_task(name="tasks.update_sentiment_scores", bind=True, max_retries=3)
+@celery_app.task(name="app.tasks.sentiment.update_sentiment_scores", bind=True, max_retries=3)
 def update_sentiment_scores(self, symbol: str = None):
     """
     Update sentiment scores for active symbols.
@@ -163,7 +164,7 @@ def _fetch_news_for_symbol(symbol: str) -> str:
         return ""
 
 
-@shared_task(name="tasks.clear_stale_sentiment_cache", bind=True)
+@celery_app.task(name="app.tasks.clear_stale_sentiment_cache", bind=True)
 def clear_stale_sentiment_cache(self):
     """
     Clear stale sentiment cache entries.

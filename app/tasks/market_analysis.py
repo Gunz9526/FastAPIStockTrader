@@ -49,10 +49,10 @@ def analyze_market():
         
         for symbol in symbols:
             try:
-                # Get recent OHLCV data
-                ohlcv = repo.get_ohlcv_range(symbol, start_date, end_date)
+                # Get recent 15-minute OHLCV data
+                ohlcv = repo.get_ohlcv_range(symbol, start_date, end_date, timeframe='15m')
                 
-                if len(ohlcv) < 10:
+                if len(ohlcv) < 100:  # Need at least 100 bars for meaningful analysis
                     logger.debug(f"Insufficient data for {symbol}")
                     continue
                 
@@ -74,14 +74,15 @@ def analyze_market():
                 returns.append(total_return)
                 volatilities.append(volatility)
                 
-                # Classify symbols
-                if total_return > 5:  # >5% gain
+                # Classify symbols (adjusted for 15-minute bars)
+                # 15m bars: ~26 bars/day * 30 days = ~780 bars
+                if total_return > 2:  # >2% gain in 30 days (15m timeframe)
                     analysis_results['high_momentum'].append(symbol)
                 
-                if volatility < 0.2:  # <20% annual volatility
+                if volatility < 0.15:  # <15% annual volatility
                     analysis_results['low_volatility'].append(symbol)
                 
-                if avg_volume > 1_000_000:  # High liquidity
+                if avg_volume > 100_000:  # Adjusted for 15m bars (lower threshold)
                     analysis_results['high_volume'].append(symbol)
                 
                 analysis_results['analyzed_symbols'] += 1

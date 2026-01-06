@@ -64,22 +64,18 @@ class CorporateAction(Base):
 class StockFundamentals(Base):
     """
     RAG Data: Fundamental analysis data.
-    
-    NOTE (2026-01-06): Sentiment and fundamentals removed from DB.
-    - Sentiment: Volatile data, Redis-only with 1-hour TTL
-    - Fundamentals: On-demand fetch via yfinance with LRU cache
-    - No historical tracking needed for current trading strategy
-    
-    This table is kept for future use (earnings reports, etc.)
     """
     __tablename__ = "stock_fundamentals"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     symbol: Mapped[str] = mapped_column(ForeignKey("stock_tickers.symbol"), nullable=False, index=True)
     date: Mapped[date] = mapped_column(Date, nullable=False)
-    
-    # Reserved for future fundamental data (earnings, revenue, etc.)
-    # per, pbr, roe, market_cap, sector, sentiment_score removed (2026-01-06)
+    per: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    pbr: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    roe: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    market_cap: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    sector: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
 
     ticker: Mapped["StockTicker"] = relationship(back_populates="fundamentals")
 

@@ -108,14 +108,54 @@ class LGBMWrapper(ModelWrapper):
         self.params = params
 
     def train(self, X: pd.DataFrame, y: pd.Series, params: Dict[str, Any] = None):
+        """Train with data-adaptive complexity adjustment."""
+        n_samples = len(X)
+        
         # Use init params, allow override
         final_params = self.params.copy()
         if params:
             final_params.update(params)
             
-        # Default fallback
+        # Auto-adjust based on data size if no params provided
         if not final_params:
-            final_params = {'n_estimators': 100, 'max_depth': 5, 'learning_rate': 0.1, 'verbose': -1}
+            if n_samples < 1000:
+                final_params = {
+                    'n_estimators': 50,
+                    'max_depth': 3,
+                    'num_leaves': 7,  # 2^3 - 1
+                    'min_data_in_leaf': 10,
+                    'learning_rate': 0.1,
+                    'verbose': -1
+                }
+            elif n_samples < 3000:
+                final_params = {
+                    'n_estimators': 100,
+                    'max_depth': 5,
+                    'num_leaves': 31,
+                    'min_data_in_leaf': 20,
+                    'learning_rate': 0.05,
+                    'verbose': -1
+                }
+            else:
+                final_params = {
+                    'n_estimators': 150,
+                    'max_depth': 6,
+                    'num_leaves': 63,
+                    'min_data_in_leaf': 30,
+                    'learning_rate': 0.03,
+                    'verbose': -1
+                }
+        else:
+            # Ensure verbose is set
+            if 'verbose' not in final_params:
+                final_params['verbose'] = -1
+            
+            # Data-adaptive safety checks for tuned params
+            if n_samples < 1000:
+                # For small datasets, relax constraints
+                final_params['min_data_in_leaf'] = min(final_params.get('min_data_in_leaf', 20), 10)
+                final_params['num_leaves'] = min(final_params.get('num_leaves', 31), 15)
+                final_params['max_depth'] = min(final_params.get('max_depth', 6), 4)
             
         self.model = LGBMRegressor(**final_params)
         self.model.fit(X, y)

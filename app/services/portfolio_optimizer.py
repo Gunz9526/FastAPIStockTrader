@@ -79,17 +79,24 @@ class PortfolioOptimizer:
                 logger.info(f"??Using LIVE trade data ({live_trade_count} trades)")
                 returns_data = self._get_live_returns(repo, symbols)
             else:
-                logger.warning(f"?�️ Using BACKTEST data (live trades: {live_trade_count}/{self.min_live_trades})")
+                logger.warning(f"Using BACKTEST data (live trades: {live_trade_count}/{self.min_live_trades})")
                 returns_data = self._get_backtest_returns(repo, symbols)
             
             # Calculate correlation
-            df_returns = pd.DataFrame(returns_data)
+            # Align returns to same length (use shortest length)
+            min_length = min(len(v) for v in returns_data.values())
+            if min_length == 0:
+                logger.warning("No return data available, using identity matrix")
+                return pd.DataFrame(np.eye(len(symbols)), index=symbols, columns=symbols)
+            
+            aligned_returns = {k: v[:min_length] for k, v in returns_data.items()}
+            df_returns = pd.DataFrame(aligned_returns)
             corr_matrix = df_returns.corr()
             
             # Cache for 24 hours
-            cache.set(cache_key, corr_matrix.to_json(), ttl=self.cache_ttl)
+            cache.set(cache_key, corr_matrix.to_json(), ttl_seconds=self.cache_ttl)
             
-            logger.info(f"Correlation matrix calculated:\n{corr_matrix}")
+            logger.info(f"Correlation matrix calculated ({min_length} samples):\n{corr_matrix}")
             return corr_matrix
             
         except Exception as e:
@@ -181,7 +188,7 @@ class PortfolioOptimizer:
             var_amount = portfolio_value * var_percentile
             
             # Cache for 24 hours
-            cache.set(cache_key, str(var_amount), ttl=self.cache_ttl)
+            cache.set(cache_key, str(var_amount), ttl_seconds=self.cache_ttl)
             
             logger.info(f"?�� VaR ({confidence:.0%}): ${var_amount:,.2f} (Portfolio: ${portfolio_value:,.0f})")
             return var_amount
@@ -274,7 +281,7 @@ class PortfolioOptimizer:
             kelly_safe = max(0, min(kelly * kelly_fraction, 0.30))
             
             # Cache for 24 hours
-            cache.set(cache_key, str(kelly_safe), ttl=self.cache_ttl)
+            cache.set(cache_key, str(kelly_safe), ttl_seconds=self.cache_ttl)
             
             logger.info(
                 f"{symbol} Kelly: {kelly_safe:.2%} "

@@ -105,7 +105,6 @@ async def get_fundamentals_for_rag(
             "roe": fund.roe,
             "market_cap": fund.market_cap,
             "sector": fund.sector,
-            "sentiment_score": fund.sentiment_score,
             "valuation_summary": {
                 "undervalued": fund.per is not None and fund.per < 15,
                 "growth_stock": fund.roe is not None and fund.roe > 0.15

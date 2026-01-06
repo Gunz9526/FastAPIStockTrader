@@ -122,14 +122,18 @@ def _load_and_prepare_data(
     X = pd.concat(all_X, ignore_index=True)
     y = pd.concat(all_y, ignore_index=True)
     
-    # Phase H.3: Classify by market regime
     if classify_regime:
-        logger.info("🧠 Classifying data by market regime...")
+        logger.info("Classifying data by market regime...")
         regime_detector = RegimeDetector()
         
         # Load SPY data for regime classification
         try:
-            spy_ohlcv = repo.get_ohlcv_range('SPY', start_date, end_date)
+            spy_ohlcv = repo.get_ohlcv_range('SPY', start_date, end_date, timeframe='15m')
+            if len(spy_ohlcv) < 100:
+                logger.warning("Insufficient SPY data for regime classification")
+                X['regime'] = MarketRegime.SIDEWAYS_CALM.value
+                return X, y, successful_symbols
+            
             spy_df = pd.DataFrame([{
                 'date_time': bar.date_time,
                 'open': bar.open,
@@ -357,6 +361,7 @@ def _train_regime_specific_models(
         sharpe_ratios = []
         for name, model in models_to_eval:
             try:
+                logger.info(f"  Training {name}...")
                 # Use TimeSeriesSplit for regime-specific validation
                 tscv = TimeSeriesSplit(n_splits=3)
                 scores = []
@@ -371,9 +376,9 @@ def _train_regime_specific_models(
                     scores.append(sharpe)
                 sharpe = sum(scores) / len(scores) if scores else 0.0
                 sharpe_ratios.append(max(sharpe, 0.1))
-                logger.info(f"  {name} | Sharpe: {sharpe:.4f}")
+                logger.info(f"  ✅ {name} | Sharpe: {sharpe:.4f}")
             except Exception as e:
-                logger.error(f"  Failed {name}: {e}")
+                logger.error(f"  ❌ Failed {name}: {e}", exc_info=True)
                 sharpe_ratios.append(0.1)
         
         # Normalize weights
@@ -383,8 +388,8 @@ def _train_regime_specific_models(
         
         # Train ensemble
         try:
-            ensemble = EnsembleWrapper(weights=weights)
-            ensemble.fit(X_regime_scaled, y_regime, model_params=tuning_config)
+            ensemble = EnsembleWrapper(weights=weights, model_params=tuning_config)
+            ensemble.train(X_regime_scaled, y_regime)
             
             # Save model
             model_filename = f"ensemble_model_{regime_value}.pkl"

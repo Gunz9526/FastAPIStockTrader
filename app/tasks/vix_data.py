@@ -1,7 +1,3 @@
-"""
-VIX Data Collection Task
-Phase F.3: Fetch VIX (Volatility Index) from Alpaca for regime detection
-"""
 from celery import shared_task
 from celery.utils.log import get_task_logger
 from app.core.database import get_sync_session

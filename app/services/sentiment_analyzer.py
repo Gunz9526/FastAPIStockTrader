@@ -133,20 +133,20 @@ class SentimentAnalyzer:
         
         # Construct prompt for Gemini
         prompt = f"""
-You are a financial sentiment analyst. Analyze the following news about {symbol} stock.
+                You are a financial sentiment analyst. Analyze the following news about {symbol} stock.
 
-News:
-{news_text}
+                News:
+                {news_text}
 
-Task:
-1. Determine the overall sentiment (positive, negative, or neutral)
-2. Provide a numerical score from -1.0 (extremely negative) to +1.0 (extremely positive)
-3. Consider financial impact, market reaction potential, and business fundamentals
+                Task:
+                1. Determine the overall sentiment (positive, negative, or neutral)
+                2. Provide a numerical score from -1.0 (extremely negative) to +1.0 (extremely positive)
+                3. Consider financial impact, market reaction potential, and business fundamentals
 
-Response format (JSON only):
-{{"score": <float between -1.0 and 1.0>, "reasoning": "<brief explanation>"}}
-"""
-        
+                Response format (JSON only):
+                {{"score": <float between -1.0 and 1.0>, "reasoning": "<brief explanation>"}}
+                """
+                    
         try:
             # Use google-genai client API
             response = self.gemini_client.models.generate_content(
@@ -168,7 +168,7 @@ Response format (JSON only):
             # Clamp score to valid range
             score = max(-1.0, min(1.0, score))
             
-            logger.info(f"Sentiment for {symbol}: {score} | Reasoning: {result.get('reasoning', 'N/A')}")
+            logger.info(f"@@감성점수@@Sentiment for {symbol}: {score} | Reasoning: {result.get('reasoning', 'N/A')}")
             return score
         
         except Exception as e:
