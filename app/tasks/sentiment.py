@@ -51,8 +51,6 @@ def update_sentiment_scores(self, symbol: str = None):
         for sym in symbols:
             try:
                 # TODO: Fetch news from external API
-                # For now, we'll use a placeholder
-                # In production, integrate with NewsAPI, Alpha Vantage, or similar
                 news_text = _fetch_news_for_symbol(sym)
                 
                 if news_text:
@@ -83,27 +81,12 @@ def update_sentiment_scores(self, symbol: str = None):
 
 def _fetch_news_for_symbol(symbol: str) -> str:
     """
-    Fetch latest news for a symbol from Finnhub.
+    Fetch latest news for a symbol from Finnhub using official Python client.
     
-    Integration: Finnhub (https://finnhub.io)
+    Integration: Finnhub Python Client (https://github.com/finnhub-stock-api/finnhub-python)
     - Free tier: 60 API calls/minute (sufficient for hourly updates)
     - Production: $59/month (Professional plan)
     - Quality: Premium financial news (Reuters, Bloomberg, WSJ, etc.)
-    
-    API Endpoint: GET /v1/company-news
-    Response: [
-        {
-            "category": "company news",
-            "datetime": 1596589501,
-            "headline": "Square surges after reporting 64% jump in revenue",
-            "id": 5085164,
-            "image": "https://...",
-            "related": "SQ",
-            "source": "SeekingAlpha",
-            "summary": "Square Inc. (NYSE:SQ) shares rose...",
-            "url": "https://seekingalpha.com/..."
-        }
-    ]
     
     Args:
         symbol: Stock symbol (e.g., 'AAPL', 'MSFT')
@@ -112,35 +95,30 @@ def _fetch_news_for_symbol(symbol: str) -> str:
         Aggregated news text (headlines + summaries) or empty string
     """
     import os
-    import requests
+    import finnhub
     from datetime import datetime, timedelta
     
     # Check for Finnhub API key
     api_key = os.getenv("FINNHUB_API_KEY")
     
     if not api_key:
-        logger.debug(f"FINNHUB_API_KEY not set. Skipping news fetch for {symbol}")
+        logger.warning(f"⚠️ FINNHUB_API_KEY not set. Skipping news fetch for {symbol}")
         return ""
     
     try:
-        # Finnhub company news endpoint
-        url = "https://finnhub.io/api/v1/company-news"
+        # Initialize Finnhub client
+        finnhub_client = finnhub.Client(api_key=api_key)
         
         # Time range: last 24 hours
         today = datetime.now()
         yesterday = today - timedelta(days=1)
         
-        params = {
-            'symbol': symbol,
-            'from': yesterday.strftime('%Y-%m-%d'),
-            'to': today.strftime('%Y-%m-%d'),
-            'token': api_key
-        }
-        
-        response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()
-        
-        articles = response.json()
+        # Fetch company news using official client
+        articles = finnhub_client.company_news(
+            symbol=symbol,
+            _from=yesterday.strftime('%Y-%m-%d'),
+            to=today.strftime('%Y-%m-%d')
+        )
         
         # Filter out empty or invalid articles
         if not articles or not isinstance(articles, list):
@@ -172,11 +150,12 @@ def _fetch_news_for_symbol(symbol: str) -> str:
             logger.debug(f"No meaningful content in news for {symbol}")
             return ""
         
-        logger.info(f"Fetched {len(articles)} Finnhub articles for {symbol} (sources: {set([a.get('source', 'Unknown') for a in articles])})")
+        sources = set([a.get('source', 'Unknown') for a in articles])
+        logger.info(f"✅ Fetched {len(articles)} Finnhub articles for {symbol} (sources: {sources})")
         return news_text.strip()
     
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Finnhub API request failed for {symbol}: {e}")
+    except finnhub.FinnhubAPIException as e:
+        logger.error(f"Finnhub API error for {symbol}: {e}")
         return ""
     
     except Exception as e:

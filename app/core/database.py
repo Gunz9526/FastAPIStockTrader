@@ -8,7 +8,7 @@ from app.core.config import settings
 # Create Async Engine
 engine = create_async_engine(
     str(settings.DATABASE_URL),
-    echo=settings.ENV_STATE == "dev",
+    echo=False,  # Disable SQL echo, use logging.py configuration instead
     future=True,
     pool_pre_ping=True
 )
@@ -29,7 +29,7 @@ sync_db_url = str(settings.DATABASE_URL).replace('postgresql+asyncpg://', 'postg
 # Create Sync Engine
 sync_engine = create_engine(
     sync_db_url,
-    echo=settings.ENV_STATE == "dev",
+    echo=False,  # Disable SQL echo, use logging.py configuration instead
     pool_pre_ping=True,
     pool_size=5,
     max_overflow=10

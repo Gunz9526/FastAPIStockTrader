@@ -150,6 +150,16 @@ class FeatureEngineer:
                 # If VWAP not available, use neutral value
                 df['vwap_distance'] = 0.0
             
+            # 12. Trade count intensity (if trade_count data available)
+            # Higher trade count indicates higher market participation and liquidity
+            if 'trade_count' in df.columns and df['trade_count'].notna().any():
+                # Normalize by rolling average
+                trade_count_ma = df['trade_count'].rolling(window=20, min_periods=1).mean()
+                df['trade_intensity'] = df['trade_count'] / (trade_count_ma + 1e-8)
+            else:
+                # If trade_count not available, use neutral value
+                df['trade_intensity'] = 1.0
+            
             # 12. Sentiment features (Phase F.1)
             # NOTE: Sentiment is fetched separately and passed as additional context
             # We'll add it during extract_feature_vector if available
@@ -298,8 +308,16 @@ class FeatureEngineer:
         return self.add_technical_indicators(df)
     
     @property
-    def feature_columns(self) -> list:
-        """Return list of feature column names."""
+    def base_feature_columns(self) -> list:
+        """
+        Return base technical indicator features only (for training on historical data).
+        
+        This excludes Phase F features (sentiment, fundamentals) which are not available
+        in historical OHLCV data. Use this for model training on historical data.
+        
+        Returns:
+            List of 20 base technical indicator feature names
+        """
         return [
             'rsi', 'macd', 'macd_signal', 'macd_hist',
             'bb_width', 'bb_position',
@@ -309,6 +327,21 @@ class FeatureEngineer:
             'volume_ratio', 'roc', 'mom',
             'sector_id', 'relative_volume',  # Cross-sectional features
             'vwap_distance',  # VWAP feature (Phase G)
+            'trade_intensity'  # Trade count feature (liquidity indicator)
+        ]
+    
+    @property
+    def feature_columns(self) -> list:
+        """
+        Return full feature list including Phase F enhancements.
+        
+        This includes all base features plus sentiment and fundamentals.
+        Use this for live prediction when Phase F features are available.
+        
+        Returns:
+            List of 25 feature names (20 base + 5 Phase F)
+        """
+        return self.base_feature_columns + [
             'sentiment_score',  # Sentiment feature (Phase F.1)
             'pe_ratio', 'pb_ratio', 'roe', 'beta'  # Fundamental features (Phase F.2)
         ]

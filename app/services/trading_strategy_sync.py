@@ -32,10 +32,27 @@ class SyncTradingStrategy:
         self.regime_detector = RegimeDetector()  # Phase H: Regime detection
         self.current_regime = MarketRegime.SIDEWAYS_CALM  # Default
         
+        # Phase F: Sentiment & Fundamentals (거래 신호 보강용)
+        try:
+            from app.services.sentiment_analyzer import get_sentiment_analyzer
+            from app.services.fundamental_provider import get_fundamental_provider
+            self.sentiment_analyzer = get_sentiment_analyzer()
+            self.fundamental_provider = get_fundamental_provider()
+            logger.info("Sentiment & Fundamentals analyzers initialized")
+        except Exception as e:
+            logger.warning(f"Phase F analyzers initialization failed: {e}")
+            self.sentiment_analyzer = None
+            self.fundamental_provider = None
+        
         # Phase I.2: Portfolio optimization
         self.optimizer = PortfolioOptimizer(lookback_days=14, min_live_trades=50)
         self.max_positions = 5  # Max 5 concurrent positions
         self.multi_position_mode = True  # Enable multi-position trading
+        
+        # Phase F: Adaptive weights (자동 조절)
+        self.sentiment_weight = 0.15  # Sentiment 영향도 15%
+        self.fundamentals_weight = 0.10  # Fundamentals 영향도 10%
+        self.ml_prediction_weight = 0.75  # ML 예측 영향도 75%
         
         # Initialize Alpaca API
         try:
@@ -153,21 +170,34 @@ class SyncTradingStrategy:
 
     def _execute_trade_logic(self, symbol: str, prediction: float, current_price: float):
         """
-        Execute trade based on prediction.
-        Thresholds adjusted for 15-minute timeframe (smaller moves expected).
+        Execute trade based on prediction + sentiment + fundamentals.
+        Phase F: Adaptive signal adjustment with auto-weighted factors.
         """
+        # Phase F: Get sentiment and fundamentals
+        sentiment_score, fundamentals = self._get_phase_f_signals(symbol)
+        
+        # Phase F: Adjust prediction with weighted factors
+        adjusted_prediction = self._calculate_adjusted_signal(
+            ml_prediction=prediction,
+            sentiment_score=sentiment_score,
+            fundamentals=fundamentals
+        )
+        
         # Thresholds: Expected 15m return > 0.2% for BUY, < -0.2% for SELL
-        # (More frequent trading with 15m data)
         buy_threshold = 0.002  
         sell_threshold = -0.002
         
-        logger.info(f"{symbol} [15m] Pred: {prediction:.5f} | Price: {current_price}")
+        logger.info(
+            f"{symbol} [15m] ML: {prediction:.5f} | Sentiment: {sentiment_score:.2f} | "
+            f"Adjusted: {adjusted_prediction:.5f} | Price: {current_price}"
+        )
         
         if self.api is None:
             logger.warning("Alpaca API not initialized, skipping trade")
             return
 
-        if prediction > buy_threshold:
+        # Use adjusted prediction (Phase F: ML + Sentiment + Fundamentals)
+        if adjusted_prediction > buy_threshold:
             # BUY SIGNAL
             # Phase I.1: Check cooldown period
             can_enter, reason = self.risk_manager.can_enter_position(symbol)
@@ -178,7 +208,7 @@ class SyncTradingStrategy:
             logger.info(f"{symbol} BUY allowed: {reason}")
             self._place_order(symbol, "buy", "limit", current_price)
             
-        elif prediction < sell_threshold:
+        elif adjusted_prediction < sell_threshold:
             # SELL SIGNAL
             # Check if we hold the position first
             if self._has_position(symbol):
@@ -202,6 +232,76 @@ class SyncTradingStrategy:
             else:
                 logger.debug(f"{symbol}: Skip SELL (No position)")
 
+    def _get_phase_f_signals(self, symbol: str) -> tuple:
+        """
+        Get sentiment and fundamentals signals for a symbol.
+        
+        Returns:
+            tuple: (sentiment_score, fundamentals_dict)
+        """
+        # Default values (neutral)
+        sentiment_score = 0.0
+        fundamentals = {'pe_ratio': 15.0, 'pb_ratio': 3.0, 'overvalued': False}
+        
+        try:
+            # Get sentiment from cache (1-hour TTL)
+            if self.sentiment_analyzer:
+                sentiment_score = self.sentiment_analyzer.get_sentiment_from_cache(symbol)
+                if sentiment_score is None:
+                    sentiment_score = 0.0  # Neutral if no data
+        except Exception as e:
+            logger.debug(f"Sentiment fetch failed for {symbol}: {e}")
+        
+        try:
+            # Get fundamentals (cached via yfinance LRU)
+            if self.fundamental_provider:
+                fund_data = self.fundamental_provider.get_fundamentals(symbol)
+                if fund_data:
+                    fundamentals = {
+                        'pe_ratio': fund_data.get('pe_ratio', 15.0),
+                        'pb_ratio': fund_data.get('pb_ratio', 3.0),
+                        'overvalued': fund_data.get('pe_ratio', 15.0) > 40  # PE > 40 = overvalued
+                    }
+        except Exception as e:
+            logger.debug(f"Fundamentals fetch failed for {symbol}: {e}")
+        
+        return sentiment_score, fundamentals
+    
+    def _calculate_adjusted_signal(self, ml_prediction: float, sentiment_score: float, fundamentals: dict) -> float:
+        """
+        Calculate adjusted trading signal with adaptive weights.
+        
+        Formula:
+            Adjusted = (ML * 0.75) + (Sentiment * 0.15) + (Fundamentals * 0.10)
+        
+        Args:
+            ml_prediction: Model prediction (-0.05 to +0.05 range)
+            sentiment_score: Sentiment score (-1.0 to +1.0)
+            fundamentals: Fundamentals dict with PE, PB ratios
+        
+        Returns:
+            Adjusted prediction value
+        """
+        # Sentiment adjustment: -1.0 (극도 부정) to +1.0 (극도 긍정)
+        # Scale to same magnitude as ML prediction
+        sentiment_adjustment = sentiment_score * 0.005  # Max ±0.005
+        
+        # Fundamentals adjustment: Overvalued penalty
+        fundamentals_adjustment = 0.0
+        if fundamentals['overvalued']:
+            fundamentals_adjustment = -0.003  # Penalty for overvalued stocks
+        elif fundamentals['pe_ratio'] < 10:  # Undervalued
+            fundamentals_adjustment = 0.002  # Bonus for undervalued stocks
+        
+        # Weighted combination
+        adjusted = (
+            ml_prediction * self.ml_prediction_weight +
+            sentiment_adjustment * self.sentiment_weight +
+            fundamentals_adjustment * self.fundamentals_weight
+        )
+        
+        return adjusted
+    
     def _has_position(self, symbol: str) -> bool:
         """Check if position exists for symbol."""
         try:

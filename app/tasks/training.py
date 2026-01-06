@@ -71,10 +71,15 @@ def _load_and_prepare_data(
                 'high': bar.high,
                 'low': bar.low,
                 'close': bar.close,
-                'volume': bar.volume
+                'volume': bar.volume,
+                'vwap': bar.vwap if hasattr(bar, 'vwap') else None,
+                'trade_count': bar.trade_count if hasattr(bar, 'trade_count') else None
             } for bar in ohlcv])
             df.set_index('date_time', inplace=True)
             df.sort_index(inplace=True)
+            
+            # Add symbol column BEFORE feature engineering (needed for sector_id)
+            df['symbol'] = symbol
             
             # Feature engineering
             features_df = feature_engineer.create_features(df)
@@ -86,10 +91,21 @@ def _load_and_prepare_data(
             features_df['target'] = features_df['close'].pct_change().shift(-1)
             features_df.dropna(inplace=True)
             
-            # Add symbol identifier (for future sector-based features)
-            features_df['symbol'] = symbol
+            # Add relative_volume (market-relative volume)
+            # Note: Using symbol-level average as approximation for market average
+            if 'volume' in features_df.columns:
+                market_avg_volume = features_df['volume'].mean()
+                features_df['relative_volume'] = features_df['volume'] / market_avg_volume
+            else:
+                features_df['relative_volume'] = 1.0
             
-            all_X.append(features_df[feature_engineer.feature_columns])
+            # Verify all required features are present
+            missing_features = [f for f in feature_engineer.base_feature_columns if f not in features_df.columns]
+            if missing_features:
+                logger.error(f"{symbol}: Missing features: {missing_features}")
+                continue
+            
+            all_X.append(features_df[feature_engineer.base_feature_columns])
             all_y.append(features_df['target'])
             successful_symbols.append(symbol)
             
@@ -662,7 +678,8 @@ def analyze_feature_importance(self, regime: str = None):
         # Create feature importance DataFrame
         feature_engineer = FeatureEngineer()
         if feature_names is None:
-            feature_names = feature_engineer.feature_columns
+            # Use base_feature_columns since models are trained on historical data
+            feature_names = feature_engineer.base_feature_columns
         
         importance_df = pd.DataFrame({
             'feature': feature_names,

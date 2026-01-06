@@ -141,7 +141,9 @@ class AlpacaDataProvider(AbstractDataProvider):
                         low=float(bar.low),
                         close=float(bar.close),
                         volume=float(bar.volume),
-                        adj_close=None
+                        adj_close=None,  # Not available for intraday bars
+                        vwap=float(bar.vwap) if hasattr(bar, 'vwap') and bar.vwap is not None else None,
+                        trade_count=int(bar.trade_count) if hasattr(bar, 'trade_count') and bar.trade_count is not None else None
                     ))
                 return result
             

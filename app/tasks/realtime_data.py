@@ -7,11 +7,11 @@ from app.worker import celery_app
 from app.core.database import SessionLocal
 from app.repositories.stock_repo_sync import SyncStockRepository
 from datetime import datetime, timedelta
-import pandas as pd
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from app.core.config import settings
+from pytz import timezone
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,8 @@ def collect_15m_realtime():
     logger.info("Starting 15m real-time data collection...")
     
     # Check if market is currently open
-    current_time = datetime.now()
+    et_tz = timezone('America/New_York')
+    current_time = datetime.now(et_tz)
     current_hour = current_time.hour
     current_minute = current_time.minute
     day_of_week = current_time.weekday()  # 0=Monday, 6=Sunday
@@ -90,8 +91,11 @@ def collect_15m_realtime():
                     continue
                 
                 # Process each bar
+                inserted_bars = 0
+                updated_bars = 0
+                
                 for bar in symbol_bars:
-                    # Check if this bar already exists in DB
+                    # Check if this bar already exists in DB (exact datetime match)
                     existing = repo.get_ohlcv_by_datetime(symbol, bar.timestamp, timeframe='15m')
                     
                     if existing:
@@ -103,6 +107,7 @@ def collect_15m_realtime():
                         existing.volume = float(bar.volume)
                         existing.vwap = float(bar.vwap) if hasattr(bar, 'vwap') and bar.vwap else None
                         existing.trade_count = int(bar.trade_count) if hasattr(bar, 'trade_count') and bar.trade_count else None
+                        updated_bars += 1
                     else:
                         # Insert new bar
                         from app.domain.schemas.stock import StockOHLCVCreate
@@ -122,9 +127,10 @@ def collect_15m_realtime():
                         )
                         
                         repo.create_ohlcv(ohlcv_data)
+                        inserted_bars += 1
                 
                 success_count += 1
-                logger.debug(f"{symbol}: 15m data collected ({len(symbol_bars)} bars)")
+                logger.debug(f"{symbol}: {inserted_bars} new bars, {updated_bars} updated bars")
                 
             except Exception as e:
                 error_count += 1

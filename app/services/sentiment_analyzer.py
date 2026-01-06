@@ -9,9 +9,9 @@ from datetime import datetime, timedelta
 import redis
 import json
 
-# Gemini API import (fallback to openai-compatible interface)
+# Gemini API import (using new google-genai SDK)
 try:
-    import google.generativeai as genai
+    from google import genai
     GEMINI_AVAILABLE = True
 except ImportError:
     GEMINI_AVAILABLE = False
@@ -57,25 +57,24 @@ class SentimentAnalyzer:
             return None
     
     def _init_gemini(self):
-        """Initialize Gemini API"""
+        """Initialize Gemini API (google-genai SDK)"""
         if not GEMINI_AVAILABLE:
-            logger.warning("google-generativeai not installed. Sentiment analysis disabled.")
-            self.gemini_model = None
+            logger.warning("google-genai not installed. Sentiment analysis disabled.")
+            self.gemini_client = None
             return
         
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             logger.warning("GEMINI_API_KEY not set. Sentiment analysis disabled.")
-            self.gemini_model = None
+            self.gemini_client = None
             return
         
         try:
-            genai.configure(api_key=api_key)
-            self.gemini_model = genai.GenerativeModel('gemini-pro')
+            self.gemini_client = genai.Client(api_key=api_key)
             logger.info("Gemini API initialized for sentiment analysis")
         except Exception as e:
             logger.error(f"Gemini API initialization failed: {e}")
-            self.gemini_model = None
+            self.gemini_client = None
     
     def get_cache_key(self, symbol: str) -> str:
         """Generate Redis cache key"""
@@ -119,7 +118,7 @@ class SentimentAnalyzer:
     
     def analyze_news(self, symbol: str, news_text: str) -> float:
         """
-        Analyze news text using Gemini API.
+        Analyze news text using Gemini API (google-genai SDK).
         
         Args:
             symbol: Stock symbol (e.g., 'AAPL')
@@ -128,8 +127,8 @@ class SentimentAnalyzer:
         Returns:
             Sentiment score from -1.0 to +1.0
         """
-        if not self.gemini_model:
-            logger.warning("Gemini model not available. Returning neutral sentiment.")
+        if not self.gemini_client:
+            logger.warning("Gemini client not available. Returning neutral sentiment.")
             return 0.0
         
         # Construct prompt for Gemini
@@ -149,7 +148,11 @@ Response format (JSON only):
 """
         
         try:
-            response = self.gemini_model.generate_content(prompt)
+            # Use google-genai client API
+            response = self.gemini_client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=prompt
+            )
             result_text = response.text.strip()
             
             # Parse JSON response

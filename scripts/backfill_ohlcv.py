@@ -2,12 +2,14 @@
 OHLCV Historical Data Backfill Script
 
 과거 N년 데이터를 Alpaca API에서 가져와 DB에 저장합니다.
+개별 bar 단위로 중복 체크하여 기존 데이터는 보존하고 누락된 데이터만 추가합니다.
 """
 import asyncio
 import sys
 import os
 from datetime import datetime, timedelta
 import logging
+from pytz import timezone
 
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -36,7 +38,7 @@ async def backfill_ohlcv(years: int = BACKFILL_YEARS):
     Args:
         years: 백필할 년수 (기본 2년)
     """
-    logger.info(f"🚀 Starting OHLCV backfill for {years} years...")
+    logger.info(f"Starting OHLCV backfill for {years} years...")
     
     provider = AlpacaDataProvider()
     
@@ -54,7 +56,8 @@ async def backfill_ohlcv(years: int = BACKFILL_YEARS):
         logger.info(f"Found {len(symbols)} active tickers")
         
         # 2. 날짜 범위 설정
-        end_date = datetime.now()
+        et_tz = timezone('America/New_York')
+        end_date = datetime.now(et_tz)
         start_date = end_date - timedelta(days=years * 365)
         
         logger.info(f"Date range: {start_date.date()} to {end_date.date()}")
@@ -69,24 +72,11 @@ async def backfill_ohlcv(years: int = BACKFILL_YEARS):
             logger.info(f"[{idx}/{len(symbols)}] Processing {symbol}...")
             
             try:
-                # 3.1. 기존 데이터 확인 (중복 방지)
-                existing = await db.execute(
-                    select(StockOHLCV)
-                    .where(StockOHLCV.symbol == symbol)
-                    .where(StockOHLCV.date_time >= start_date)
-                )
-                existing_count = len(existing.scalars().all())
-                
-                if existing_count > 0:
-                    logger.info(f"  ⚠️  {symbol} already has {existing_count} bars. Skipping.")
-                    total_skipped += existing_count
-                    continue
-                
-                # 3.2. Alpaca에서 데이터 가져오기
+                # 3.1. Alpaca에서 데이터 가져오기
                 # Request 15-minute bars
                 bars = await provider.get_historical_data(
-                    symbol, 
-                    start_date, 
+                    symbol,
+                    start_date,
                     end_date,
                     timeframe=TimeFrame(15, TimeFrameUnit.Minute)
                 )
@@ -108,26 +98,48 @@ async def backfill_ohlcv(years: int = BACKFILL_YEARS):
                     failed_symbols.append(symbol)
                     continue
                 
-                # 3.3. DB에 저장
+                # 3.2. DB에 저장 (개별 bar 단위로 중복 체크)
                 inserted_count = 0
+                skipped_count = 0
+                
                 for bar in bars:
+                    # Check if this specific bar already exists
+                    existing = await db.execute(
+                        select(StockOHLCV)
+                        .where(StockOHLCV.symbol == symbol)
+                        .where(StockOHLCV.timeframe == '15m')
+                        .where(StockOHLCV.date_time == bar.date_time)
+                    )
+                    
+                    if existing.scalar_one_or_none():
+                        # Bar already exists, skip
+                        skipped_count += 1
+                        continue
+                    
+                    # Insert new bar
+                    # Note: adj_close not available for 15m bars (daily only)
+                    # vwap and trade_count use hasattr() check for safety
                     ohlcv = StockOHLCV(
                         symbol=symbol,
                         date_time=bar.date_time,
                         timeframe='15m',
-                        open=bar.open,
-                        high=bar.high,
-                        low=bar.low,
-                        close=bar.close,
-                        volume=bar.volume
+                        open=float(bar.open),
+                        high=float(bar.high),
+                        low=float(bar.low),
+                        close=float(bar.close),
+                        volume=float(bar.volume),
+                        adj_close=None,  # Not available for 15m bars
+                        vwap=float(bar.vwap) if hasattr(bar, 'vwap') and bar.vwap is not None else None,
+                        trade_count=int(bar.trade_count) if hasattr(bar, 'trade_count') and bar.trade_count is not None else None
                     )
                     db.add(ohlcv)
                     inserted_count += 1
                 
                 await db.commit()
                 total_inserted += inserted_count
+                total_skipped += skipped_count
                 
-                logger.info(f"  ✅ {symbol}: {inserted_count} bars inserted")
+                logger.info(f"  ✅ {symbol}: {inserted_count} bars inserted, {skipped_count} bars skipped (already exist)")
                 
                 # Rate limiting (Alpaca API 제한)
                 await asyncio.sleep(0.5)
@@ -197,7 +209,9 @@ async def main():
     )
     
     args = parser.parse_args()
-    
+    et_tz = timezone('America/New_York')
+    current_time = datetime.now(et_tz)
+    logger.info(f"Current time (ET): {current_time}")
     if args.verify:
         await verify_backfill()
     else:
