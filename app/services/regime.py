@@ -16,15 +16,14 @@ class RegimeDetector:
     """
     Detect current market regime using multiple indicators.
     
-    Phase F.3: Enhanced with VIX (Volatility Index) integration
     """
     
     def __init__(
         self,
-        adx_trend_threshold: float = 25.0,
-        atr_volatility_threshold: float = 0.03,
-        vix_high_threshold: float = 20.0,  # VIX > 20 = high fear
-        vix_extreme_threshold: float = 30.0  # VIX > 30 = extreme fear
+        adx_trend_threshold: float = 18.0,  # 15분봉에 맞게 낮춤 (25 → 18)
+        atr_volatility_threshold: float = 0.015,  # 15분봉에 맞게 낮춤 (3% → 1.5%)
+        vix_high_threshold: float = 20.0,  # VIX > 20 = 높은 공포
+        vix_extreme_threshold: float = 30.0  # VIX > 30 = 극도 공포
     ):
         self.adx_threshold = adx_trend_threshold
         self.atr_threshold = atr_volatility_threshold
@@ -34,9 +33,7 @@ class RegimeDetector:
     def detect_regime(self, df: pd.DataFrame, vix_value: Optional[float] = None) -> MarketRegime:
         """
         Detect market regime from OHLCV data with indicators.
-        
-        Phase F.3: Enhanced with VIX integration for improved volatility detection
-        
+                
         Args:
             df: DataFrame with indicators (adx, sma_50, atr_pct, etc.)
             vix_value: Current VIX (Volatility Index) value (optional but recommended)
@@ -45,7 +42,7 @@ class RegimeDetector:
             MarketRegime enum
         """
         if df.empty or len(df) < 50:
-            logger.warning("Insufficient data for regime detection, defaulting to SIDEWAYS_CALM")
+            logger.warning("레짐 감지용 데이터 부족, SIDEWAYS_CALM으로 기본 설정")
             return MarketRegime.SIDEWAYS_CALM
         
         try:
@@ -56,36 +53,36 @@ class RegimeDetector:
             adx = float(latest.get('adx', 0))
             atr_pct = float(latest.get('atr_pct', 0))
             
-            # Calculate price momentum (10-day)
+            # 가격 모멘텀 계산 (10개 바 = 15분봉 150분)
             if len(df) >= 10:
                 price_change_10d = (close - df['close'].iloc[-10]) / df['close'].iloc[-10]
             else:
                 price_change_10d = 0
             
-            # Trend direction
+            # 트렌드 방향
             trend_up = close > sma_50
             strong_trend = adx > self.adx_threshold
             high_volatility = atr_pct > self.atr_threshold
             
-            # Phase F.3: VIX-enhanced volatility detection
+            # VIX 기반 변동성 감지 강화
             if vix_value is not None:
                 extreme_fear = vix_value > self.vix_extreme_threshold
                 high_fear = vix_value > self.vix_high_threshold
                 
-                # VIX overrides ATR for volatility classification
+                # VIX가 ATR보다 우선순위
                 if extreme_fear:
                     high_volatility = True
-                    logger.info(f"VIX extreme fear detected: {vix_value:.2f} (threshold: {self.vix_extreme_threshold})")
+                    logger.info("VIX 극도 공포 감지: %.2f (임계값: %.2f)", vix_value, self.vix_extreme_threshold)
                 elif high_fear:
                     high_volatility = True
-                    logger.info(f"VIX high fear detected: {vix_value:.2f} (threshold: {self.vix_high_threshold})")
+                    logger.info("VIX 높은 공포 감지: %.2f (임계값: %.2f)", vix_value, self.vix_high_threshold)
             else:
-                logger.debug("VIX not provided, using ATR-only volatility detection")
+                logger.debug("VIX 미제공, ATR 기반 변동성 감지 사용")
             
-            # Regime classification logic
-            if strong_trend and trend_up and price_change_10d > 0.02:
+            # 레짐 분류 로직 (15분봉 기준)
+            if strong_trend and trend_up and price_change_10d > 0.005:  # 150분 내 0.5% 상승
                 regime = MarketRegime.BULL_TRENDING
-            elif strong_trend and not trend_up and price_change_10d < -0.02:
+            elif strong_trend and not trend_up and price_change_10d < -0.005:  # 150분 내 0.5% 하락
                 regime = MarketRegime.BEAR_TRENDING
             elif high_volatility:
                 regime = MarketRegime.SIDEWAYS_VOLATILE
@@ -93,15 +90,16 @@ class RegimeDetector:
                 regime = MarketRegime.SIDEWAYS_CALM
             
             logger.info(
-                f"Regime detected: {regime.value} "
-                f"(ADX={adx:.1f}, ATR%={atr_pct:.3f}, VIX={vix_value if vix_value else 'N/A'}, "
-                f"Trend={'UP' if trend_up else 'DOWN'})"
+                "레짐 감지: %s (ADX=%.1f, ATR%%=%.3f, VIX=%s, 트렌드=%s)",
+                regime.value, adx, atr_pct, 
+                f"{vix_value:.1f}" if vix_value else 'N/A',
+                'UP' if trend_up else 'DOWN'
             )
             
             return regime
             
-        except Exception as e:
-            logger.error(f"Error detecting regime: {e}", exc_info=True)
+        except (ValueError, KeyError, AttributeError) as e:
+            logger.error("레짐 감지 오류: %s", str(e), exc_info=True)
             return MarketRegime.SIDEWAYS_CALM
 
 # Regime-specific strategy weights

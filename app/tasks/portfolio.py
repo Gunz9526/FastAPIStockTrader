@@ -1,40 +1,45 @@
-"""
-Portfolio Management Celery Tasks (Phase I.2)
-
-Automated daily tasks for:
-- Portfolio parameter updates (correlation, VaR, Kelly)
-- Portfolio rebalancing (MPT optimization)
-"""
-
 import logging
 from app.worker import celery_app
 from app.core.database import SessionLocal
 from app.services.portfolio_optimizer import PortfolioOptimizer
 from app.services.portfolio_rebalancer import PortfolioRebalancer
 from app.repositories.portfolio_repo import PortfolioRepository
+from app.repositories.stock_repo_sync import SyncStockRepository
+
 from alpaca.trading.client import TradingClient
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Symbol universe (can be expanded)
-PORTFOLIO_SYMBOLS = [
-    'AAPL', 'MSFT', 'GOOGL', 'NVDA', 'TSLA',
-    'META', 'AMZN', 'AMD', 'NFLX', 'SPY'
-]
+# 심볼 목록 (확장 가능)
+# PORTFOLIO_SYMBOLS = [
+#     'AAPL', 'MSFT', 'GOOGL', 'NVDA', 'TSLA',
+#     'META', 'AMZN', 'AMD', 'NFLX', 'SPY'
+# ]
 
+def get_portfolio_symbols():
+    session = SessionLocal()
+    try:
+        repo = SyncStockRepository(session)
+        symbols = repo.get_active_symbols()
+        return symbols
+    
+    except Exception as e:
+        logger.error("Failed to fetch portfolio symbols: %s", str(e), exc_info=True)
+    finally:
+        session.close()
 
 @celery_app.task(name="app.tasks.portfolio.update_portfolio_parameters")
 def update_portfolio_parameters():
     """
-    Daily parameter update task (00:00 ET).
+    일일 파라미터 업데이트 태스크 (00:00 ET).
     
-    Updates:
-    - Correlation matrix (14-day rolling)
-    - VaR (95% confidence)
-    - Kelly Criterion sizes
+    업데이트 항목:
+    - 상관 행렬 (14일 롤링)
+    - VaR (95% 신뢰도)
+    - Kelly Criterion 크기
     
-    Auto-switches from backtest to live data when sufficient trades exist.
+    충분한 거래 데이터 존재 시 백테스트에서 실시간 데이터로 자동 전환.
     """
     logger.info("Starting daily portfolio parameter update")
     
@@ -44,7 +49,7 @@ def update_portfolio_parameters():
         portfolio_repo = PortfolioRepository(session)
         optimizer = PortfolioOptimizer(lookback_days=14, min_live_trades=50)
         
-        # Get portfolio value
+        # 포트폴리오 가치 가져오기
         is_paper = 'paper' in settings.ALPACA_TRADING_URL.lower()
         trading_client = TradingClient(
             api_key=settings.ALPACA_API_KEY,
@@ -54,38 +59,38 @@ def update_portfolio_parameters():
         account = trading_client.get_account()
         portfolio_value = float(account.portfolio_value)
         
-        logger.info(f"Portfolio value: ${portfolio_value:,.2f}")
-        
-        # 1. Update correlation matrix
+        logger.info("Portfolio value: $%.2f", portfolio_value)
+        symbols = get_portfolio_symbols()
+        # 1. 상관 행렬 업데이트
         corr_matrix = optimizer.calculate_correlation_matrix(
             portfolio_repo,
-            PORTFOLIO_SYMBOLS,
+            symbols,
             use_live_data=True
         )
-        logger.info(f"Correlation matrix updated ({corr_matrix.shape})")
+        logger.info("Correlation matrix updated (%s)", str(corr_matrix.shape))
         
-        # 2. Update VaR
+        # 2. VaR 업데이트
         var = optimizer.calculate_var(
             portfolio_repo,
             portfolio_value,
             confidence=0.95,
             use_live_data=True
         )
-        logger.info(f"VaR (95%) updated: ${var:,.2f}")
+        logger.info("VaR (95%%) updated: $%.2f", var)
         
-        # 3. Update Kelly sizes
-        for symbol in PORTFOLIO_SYMBOLS:
+        # 3. Kelly 크기 업데이트
+        for symbol in symbols:
             kelly = optimizer.kelly_criterion(
                 portfolio_repo,
                 symbol,
                 use_live_data=True
             )
-            logger.info(f"{symbol} Kelly: {kelly:.2%}")
+            logger.info("%s Kelly: %.2f%%", symbol, kelly * 100)
         
         logger.info("Portfolio parameters updated successfully")
         
     except Exception as e:
-        logger.error(f"❌ Parameter update failed: {e}", exc_info=True)
+        logger.error("Parameter update failed: %s", str(e), exc_info=True)
     finally:
         session.close()
 
@@ -93,15 +98,15 @@ def update_portfolio_parameters():
 @celery_app.task(name="app.tasks.portfolio.rebalance_portfolio")
 def rebalance_portfolio(force: bool = False):
     """
-    Daily portfolio rebalancing task (15:45 ET, 15 min before close).
+    일일 포트폴리오 리밸런싱 태스크 (15:45 ET, 종가 15분 전).
     
-    Process:
-    1. Calculate optimal weights (MPT)
-    2. Check drift from current weights
-    3. Rebalance if drift > 5% (or force=True)
+    프로세스:
+    1. 최적 가중치 계산 (MPT)
+    2. 현재 가중치로부터의 드리프트 확인
+    3. 드리프트 > 5% 시 리밸런싱 (또는 force=True)
     
     Args:
-        force: If True, rebalance regardless of drift
+        force: True일 경우 드리프트와 무관하게 리밸런싱
     """
     logger.info("Starting daily portfolio rebalancing")
     
@@ -119,13 +124,13 @@ def rebalance_portfolio(force: bool = False):
         )
         
         rebalancer = PortfolioRebalancer(trading_client, portfolio_repo, optimizer)
-        
-        # Execute rebalancing
-        rebalancer.rebalance(PORTFOLIO_SYMBOLS, force=force)
+        symbols = get_portfolio_symbols()
+        # 리밸런싱 실행
+        rebalancer.rebalance(symbols, force=force)
         
         logger.info("Portfolio rebalancing complete")
         
     except Exception as e:
-        logger.error(f"❌ Rebalancing failed: {e}", exc_info=True)
+        logger.error("Rebalancing failed: %s", str(e), exc_info=True)
     finally:
         session.close()

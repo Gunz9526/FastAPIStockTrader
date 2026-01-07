@@ -1,13 +1,7 @@
-"""
-Portfolio Optimization Service (Phase I.2)
-
-Implements Modern Portfolio Theory, Kelly Criterion, and VaR calculation.
-Supports both backtest data (initial) and live trading data (auto-upgrade).
-"""
-
 import logging
 import numpy as np
 import pandas as pd
+from io import StringIO
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
 from scipy.optimize import minimize
@@ -61,12 +55,12 @@ class PortfolioOptimizer:
             Correlation matrix (DataFrame)
         """
         try:
-            # Check cache first
+            # 캐시 먼저 확인
             cache_key = f"corr_matrix:{datetime.now().date()}"
             cached = cache.get(cache_key) if cache else None
             if cached:
                 logger.info("Correlation matrix loaded from cache")
-                return pd.read_json(cached)
+                return pd.read_json(StringIO(cached))
             
             # Decide data source
             if use_live_data:
@@ -76,7 +70,7 @@ class PortfolioOptimizer:
                 use_live = False
             
             if use_live:
-                logger.info(f"??Using LIVE trade data ({live_trade_count} trades)")
+                logger.info(f"실시간 거래 데이터 사용 ({live_trade_count} trades)")
                 returns_data = self._get_live_returns(repo, symbols)
             else:
                 logger.warning(f"Using BACKTEST data (live trades: {live_trade_count}/{self.min_live_trades})")

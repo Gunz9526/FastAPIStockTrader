@@ -9,15 +9,15 @@ logger = logging.getLogger(__name__)
 @celery_app.task(name="app.tasks.trading.execute_market_scan")
 def execute_market_scan():
     """
-    Execute market scan with multi-position portfolio strategy (Phase I.2).
+    멀티 포지션 포트폴리오 전략으로 시장 스캔 실행 (Phase I.2).
     
-    Workflow:
-    1. Get all active symbols from DB
-    2. Market regime detection (SPY)
-    3. Multi-position portfolio processing (max 5 concurrent)
-    4. Auto-selection based on correlation + signals
+    워크플로우:
+    1. DB에서 모든 활성 심볼 가져오기
+    2. 시장 레짐 감지 (SPY)
+    3. 멀티 포지션 포트폴리오 처리 (최대 5개 동시)
+    4. 상관관계 + 신호 기반 자동 선택
     """
-    logger.info("Starting multi-position market scan...")
+    logger.info("멀티 포지션 시장 스캔 시작...")
     
     session = SessionLocal()
     try:
@@ -27,29 +27,28 @@ def execute_market_scan():
         strategy = SyncTradingStrategy(session)
         repo = SyncStockRepository(session)
         
-        # Get active symbols from DB (dynamic, no hardcoding)
+        # DB에서 활성 심볼 가져오기 (동적, 하드코딩 없음)
         symbols = repo.get_active_symbols()
-        logger.info(f"Candidate symbols: {len(symbols)}")
+        logger.info("후보 심볼: %d개", len(symbols))
         
-        # Enable multi-position mode
+        # 멀티 포지션 모드 활성화
         if strategy.multi_position_mode:
-            logger.info("Multi-position mode ENABLED")
+            logger.info("멀티 포지션 모드 활성화")
             
-            # Process portfolio (max 5 positions)
-            import asyncio
-            asyncio.run(strategy.process_portfolio(symbols))
+            # 포트폴리오 처리 (최대 5개 포지션)
+            strategy.process_portfolio(symbols)
         else:
-            logger.info("Single-position mode (legacy)")
+            logger.info("단일 포지션 모드 (legacy)")
             
-            # Legacy: Sequential single-position
-            for symbol in symbols[:5]:  # Limit to 5 for safety
+            # Legacy: 순차적 단일 포지션
+            for symbol in symbols[:5]:  # 안전을 위해 5개로 제한
                 strategy.process_symbol(symbol)
         
         session.commit()
-        logger.info("Market scan complete")
+        logger.info("시장 스캔 완료")
         
     except Exception as e:
-        logger.error(f"Market scan error: {e}", exc_info=True)
+        logger.error("시장 스캔 오류: %s", str(e), exc_info=True)
         session.rollback()
         raise
     finally:
@@ -59,34 +58,34 @@ def execute_market_scan():
 @celery_app.task(name="app.tasks.trading.update_trailing_stops")
 def update_trailing_stops():
     """
-    Update trailing stops (SYNC VERSION).
+    트레일링 스톱 업데이트 (SYNC 버전).
     """
-    logger.info("Updating trailing stops (sync)...")
+    logger.info("트레일링 스톱 업데이트 중 (sync)...")
     
     session = SessionLocal()
     try:
         from sqlalchemy import select
         from app.domain.models.stock import Position, PositionStatus
         
-        # Get open positions
+        # 오픈 포지션 가져오기
         stmt = select(Position).where(Position.status == PositionStatus.OPEN.value)
         result = session.execute(stmt)
         positions = list(result.scalars().all())
         
         if not positions:
-            logger.info("No open positions")
+            logger.info("오픈 포지션 없음")
             return
         
-        logger.info(f"Updating {len(positions)} positions")
+        logger.info("%d개 포지션 업데이트 중", len(positions))
         
-        # TODO: Implement sync price fetching and trailing stop logic
-        logger.warning("Trailing stop update temporarily disabled - needs sync refactoring")
+        # TODO: 동기 가격 가져오기 및 트레일링 스톱 로직 구현 필요
+        logger.warning("트레일링 스톱 업데이트 일시 비활성화 - 동기 리팩토링 필요")
         
         session.commit()
-        logger.info("Trailing stops checked")
+        logger.info("트레일링 스톱 확인 완료")
         
     except Exception as e:
-        logger.error(f"Trailing stop error: {e}", exc_info=True)
+        logger.error("트레일링 스톱 오류: %s", str(e), exc_info=True)
         session.rollback()
         raise
     finally:

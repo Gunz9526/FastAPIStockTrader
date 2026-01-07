@@ -15,7 +15,7 @@ class PredictorService:
     """
     
     _instance = None
-    _models = {}  # Dict: regime -> EnsembleWrapper
+    _models = {}
     _base_path = "/app/model_artifacts/"
     _model_map = {
         MarketRegime.BULL_TRENDING: "ensemble_model_bull_trending.pkl",
@@ -125,6 +125,6 @@ class PredictorService:
     
     def get_model_info(self) -> dict:
         """Get model metadata including weights and training date."""
-        if self._model and hasattr(self._model, 'metadata'):
-            return self._model.metadata
+        if self._models and hasattr(self._models, 'metadata'):
+            return self._models.metadata
         return {}

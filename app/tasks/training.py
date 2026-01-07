@@ -123,17 +123,34 @@ def _load_and_prepare_data(
     y = pd.concat(all_y, ignore_index=True)
     
     if classify_regime:
-        logger.info("Classifying data by market regime...")
+        logger.info("데이터를 시장 레짐별로 분류 중...")
         regime_detector = RegimeDetector()
         
-        # Load SPY data for regime classification
+        # SPY 데이터 로드 (regime classification용)
         try:
+            # SPY 15분봉 데이터 확인
             spy_ohlcv = repo.get_ohlcv_range('SPY', start_date, end_date, timeframe='15m')
-            if len(spy_ohlcv) < 100:
-                logger.warning("Insufficient SPY data for regime classification")
-                X['regime'] = MarketRegime.SIDEWAYS_CALM.value
-                return X, y, successful_symbols
             
+            # SPY 데이터 부족 시 경고 및 SPY도 symbol_subset에 포함
+            if len(spy_ohlcv) < 100:
+                logger.warning(
+                    "SPY 15분봉 데이터 부족 (%d bars). 레짐 분류를 위해 SPY도 학습에 포함합니다.",
+                    len(spy_ohlcv)
+                )
+                # SPY가 symbol_subset에 없으면 추가
+                if 'SPY' not in symbol_subset:
+                    symbol_subset = ['SPY'] + list(symbol_subset)
+                    logger.info("SPY를 symbol 목록에 추가했습니다.")
+                    # SPY 데이터 다시 로드 (루프에서 처리됨)
+                    # 여기서는 경고만 하고, 실제 로드는 메인 루프에서
+                
+                # 그래도 데이터가 부족하면 기본 레짐 사용
+                if len(spy_ohlcv) < 50:
+                    logger.warning("SPY 데이터 극도로 부족. 모든 데이터를 SIDEWAYS_CALM으로 분류합니다.")
+                    X['regime'] = MarketRegime.SIDEWAYS_CALM.value
+                    return X, y, successful_symbols
+            
+            # SPY DataFrame 생성
             spy_df = pd.DataFrame([{
                 'date_time': bar.date_time,
                 'open': bar.open,
@@ -145,28 +162,29 @@ def _load_and_prepare_data(
             spy_df.set_index('date_time', inplace=True)
             spy_df.sort_index(inplace=True)
             
-            # Generate SPY features for regime detection
+            # SPY 피처 생성 (레짐 감지용)
             spy_features = feature_engineer.create_features(spy_df)
             
-            # Classify each timestamp by regime
+            # 각 타임스탬프별로 레짐 분류
             regimes = []
             for idx in X.index:
-                # Find closest SPY timestamp
+                # 가장 가까운 SPY 타임스탬프 찾기
                 spy_window = spy_features[spy_features.index <= idx]
                 if len(spy_window) > 0:
                     regime = regime_detector.detect_regime(spy_window)
                     regimes.append(regime.value)
                 else:
-                    regimes.append(MarketRegime.SIDEWAYS_CALM.value)  # Default
+                    regimes.append(MarketRegime.SIDEWAYS_CALM.value)  # 기본값
             
             X['regime'] = regimes
-            logger.info(f"Regime distribution: {pd.Series(regimes).value_counts().to_dict()}")
+            regime_dist = pd.Series(regimes).value_counts().to_dict()
+            logger.info("레짐 분포: %s", regime_dist)
             
-        except Exception as e:
-            logger.warning(f"Regime classification failed: {e}. Proceeding without regimes.")
+        except (ValueError, KeyError, AttributeError) as e:
+            logger.warning("레짐 분류 실패: %s. 레짐 없이 진행합니다.", str(e))
             X['regime'] = MarketRegime.SIDEWAYS_CALM.value  # Fallback
     
-    logger.info(f"Total data loaded: {len(X)} samples from {len(successful_symbols)} symbols")
+    logger.info("총 %d개 샘플, %d개 심볼로부터 데이터 로드 완료", len(X), len(successful_symbols))
     return X, y, successful_symbols
 
 def _walk_forward_validation(
@@ -276,12 +294,12 @@ def train_models(self):
         has_regime = 'regime' in X.columns
         
         if has_regime:
-            logger.info("🎯 Phase H.3: Training regime-specific models")
+            logger.info("Phase H.3: Training regime-specific models")
             _train_regime_specific_models(feature_engineer, X, y)
             session.commit()
             logger.info("Training complete - regime-specific models saved")
         else:
-            logger.info("⚠️ No regime classification, training generic model")
+            logger.info("No regime classification, training generic model")
             # Fallback to old training logic (temporarily disabled)
             logger.warning("Generic model training not implemented. Enable classify_regime=True")
             
@@ -327,7 +345,7 @@ def _train_regime_specific_models(
     for regime in MarketRegime:
         regime_value = regime.value
         logger.info(f"\n{'='*60}")
-        logger.info(f"🎯 Training {regime_value.upper()} regime model")
+        logger.info(f"Training {regime_value.upper()} regime model")
         logger.info(f"{'='*60}")
         
         # Filter data for this regime
@@ -339,7 +357,7 @@ def _train_regime_specific_models(
         
         # Minimum data requirement
         if len(X_regime) < 1000:
-            logger.warning(f"⚠️ Insufficient {regime_value} data: {len(X_regime)} < 1000 samples")
+            logger.warning(f"Insufficient {regime_value} data: {len(X_regime)} < 1000 samples")
             logger.warning(f"Skipping {regime_value} model training (will use generic fallback)")
             continue
         
@@ -376,7 +394,7 @@ def _train_regime_specific_models(
                     scores.append(sharpe)
                 sharpe = sum(scores) / len(scores) if scores else 0.0
                 sharpe_ratios.append(max(sharpe, 0.1))
-                logger.info(f"  ✅ {name} | Sharpe: {sharpe:.4f}")
+                logger.info(f"  {name} | Sharpe: {sharpe:.4f}")
             except Exception as e:
                 logger.error(f"  ❌ Failed {name}: {e}", exc_info=True)
                 sharpe_ratios.append(0.1)
@@ -396,13 +414,13 @@ def _train_regime_specific_models(
             model_path = os.path.join(MODEL_SAVE_PATH, model_filename)
             ensemble.save(model_path)
             
-            logger.info(f"✅ {regime_value.upper()} model saved: {model_filename}")
+            logger.info(f"{regime_value.upper()} model saved: {model_filename}")
             
         except Exception as e:
             logger.error(f"❌ Failed to train {regime_value} model: {e}", exc_info=True)
     
     logger.info(f"\n{'='*60}")
-    logger.info("🎉 Regime-specific training complete")
+    logger.info("Regime-specific training complete")
     logger.info(f"{'='*60}\n")
 
 

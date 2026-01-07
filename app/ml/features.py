@@ -201,31 +201,34 @@ class FeatureEngineer:
         if df.empty:
             return pd.DataFrame()
         
+        # DataFrame copy 명시적 생성 (SettingWithCopyWarning 방지)
+        df = df.copy()
+        
         try:
-            # Add market-relative volume feature
+            # 시장 대비 거래량 피처 추가
             if market_avg_volume is not None and 'volume' in df.columns:
-                df['relative_volume'] = df['volume'] / market_avg_volume
+                df.loc[:, 'relative_volume'] = df['volume'] / market_avg_volume
             else:
-                df['relative_volume'] = 1.0  # Neutral if no market data
+                df.loc[:, 'relative_volume'] = 1.0  # 시장 데이터 없으면 중립값
             
-            # Add sentiment feature (Phase F.1)
+            # Sentiment 피처 추가 (Phase F.1)
             if sentiment_score is not None:
-                df['sentiment_score'] = sentiment_score
+                df.loc[:, 'sentiment_score'] = sentiment_score
             else:
-                df['sentiment_score'] = 0.0  # Neutral if no sentiment data
+                df.loc[:, 'sentiment_score'] = 0.0  # Sentiment 데이터 없으면 중립값
             
-            # Add fundamental features (Phase F.2)
+            # Fundamentals 피처 추가 (Phase F.2)
             if fundamental_data is not None:
-                df['pe_ratio'] = fundamental_data.get('pe_ratio', 15.0)  # Market average default
-                df['pb_ratio'] = fundamental_data.get('pb_ratio', 3.0)
-                df['roe'] = fundamental_data.get('roe', 0.10)  # 10% default
-                df['beta'] = fundamental_data.get('beta', 1.0)  # Market beta
+                df.loc[:, 'pe_ratio'] = fundamental_data.get('pe_ratio', 15.0)  # 시장 평균 기본값
+                df.loc[:, 'pb_ratio'] = fundamental_data.get('pb_ratio', 3.0)
+                df.loc[:, 'roe'] = fundamental_data.get('roe', 0.10)  # 10% 기본값
+                df.loc[:, 'beta'] = fundamental_data.get('beta', 1.0)  # 시장 베타
             else:
-                # Use market-average defaults if no fundamental data
-                df['pe_ratio'] = 15.0
-                df['pb_ratio'] = 3.0
-                df['roe'] = 0.10
-                df['beta'] = 1.0
+                # Fundamentals 데이터 없으면 시장 평균 기본값 사용
+                df.loc[:, 'pe_ratio'] = 15.0
+                df.loc[:, 'pb_ratio'] = 3.0
+                df.loc[:, 'roe'] = 0.10
+                df.loc[:, 'beta'] = 1.0
             
             # Select features for model (exclude OHLCV and date)
             feature_cols = [
@@ -260,10 +263,10 @@ class FeatureEngineer:
             if numeric_features:
                 if fit_scaler:
                     X_numeric_scaled = self.scaler.fit_transform(X[numeric_features])
-                    # Save scaler
+                    # Scaler 저장
                     os.makedirs(os.path.dirname(self.scaler_path), mode=0o777, exist_ok=True)
                     joblib.dump(self.scaler, self.scaler_path)
-                    logger.info(f"Scaler fitted and saved to {self.scaler_path}")
+                    logger.info("Scaler fitted and saved to %s", self.scaler_path)
                 else:
                     X_numeric_scaled = self.scaler.transform(X[numeric_features])
                 
@@ -278,8 +281,8 @@ class FeatureEngineer:
             
             return X_normalized
             
-        except Exception as e:
-            logger.error(f"Error extracting features: {e}", exc_info=True)
+        except (ValueError, KeyError, TypeError) as e:
+            logger.error("Error extracting features: %s", str(e), exc_info=True)
             return pd.DataFrame()
     
     def get_latest_features(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -383,7 +386,7 @@ class FeatureEngineer:
             else:
                 sentiment_score = raw_sentiment
             
-            logger.info(f"{symbol} sentiment added: {sentiment_score:.3f}")
+            logger.info("%s sentiment added: %.3f", symbol, sentiment_score)
         
         df['sentiment_score'] = sentiment_score
         
@@ -395,9 +398,9 @@ class FeatureEngineer:
             df['roe'] = fundamentals.get('roe', 0.10)
             df['beta'] = fundamentals.get('beta', 1.0)
             
-            logger.info(f"{symbol} fundamentals added: PE={df['pe_ratio'].iloc[0]:.2f}")
+            logger.info("%s fundamentals added: PE=%.2f", symbol, df['pe_ratio'].iloc[0])
         else:
-            # Defaults
+            # 기본값
             df['pe_ratio'] = 15.0
             df['pb_ratio'] = 3.0
             df['roe'] = 0.10

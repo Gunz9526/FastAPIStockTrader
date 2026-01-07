@@ -164,7 +164,7 @@ def _fetch_news_for_symbol(symbol: str) -> str:
         return ""
 
 
-@celery_app.task(name="app.tasks.clear_stale_sentiment_cache", bind=True)
+@celery_app.task(name="app.tasks.sentiment.clear_stale_sentiment_cache", bind=True)
 def clear_stale_sentiment_cache(self):
     """
     Clear stale sentiment cache entries.

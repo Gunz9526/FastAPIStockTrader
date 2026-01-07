@@ -14,7 +14,16 @@ async def create_ticker(
     db: AsyncSession = Depends(get_async_session)
 ):
     """
-    Create a new stock ticker.
+    새로운 주식 티커를 생성합니다.
+    
+    Parameters:
+        - ticker_in: 티커 생성 정보 (symbol, name, sector, is_active)
+    
+    Returns:
+        - 생성된 티커 정보
+    
+    Raises:
+        - 400: 티커가 이미 존재하는 경우
     """
     repo = StockRepository(db)
     existing = await repo.get_ticker(ticker_in.symbol)
@@ -28,7 +37,10 @@ async def read_tickers(
     db: AsyncSession = Depends(get_async_session)
 ):
     """
-    Retrieve all stock tickers.
+    모든 주식 티커 목록을 조회합니다.
+    
+    Returns:
+        - 전체 티커 목록 (활성/비활성 포함)
     """
     repo = StockRepository(db)
     return await repo.get_all_tickers()
@@ -39,7 +51,16 @@ async def read_ticker(
     db: AsyncSession = Depends(get_async_session)
 ):
     """
-    Get a specific ticker by symbol.
+    특정 심볼의 티커 정보를 조회합니다.
+    
+    Parameters:
+        - symbol: 주식 심볼 (예: AAPL, TSLA)
+    
+    Returns:
+        - 티커 상세 정보
+    
+    Raises:
+        - 404: 티커를 찾을 수 없는 경우
     """
     repo = StockRepository(db)
     ticker = await repo.get_ticker(symbol)

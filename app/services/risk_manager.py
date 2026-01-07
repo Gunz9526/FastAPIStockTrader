@@ -53,7 +53,7 @@ class RiskManager:
         # Position tracking (in-memory cache)
         self.positions: Dict[str, Dict] = {}
         
-        # Defense mechanisms (Phase I.1)
+        # Defense mechanisms
         self.position_entry_times: Dict[str, datetime] = {}  # In-memory cache
         self.symbol_cooldowns: Dict[str, datetime] = {}      # Redis-backed (future)
         self.min_hold_bars = 4                                # 60min (15m x 4 bars)
