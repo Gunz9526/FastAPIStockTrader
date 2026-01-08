@@ -38,7 +38,7 @@ class AbstractDataProvider(ABC):
 
 class AlpacaDataProvider(AbstractDataProvider):
     """
-    Cached Alpaca data provider for performance.
+    캐시된 Alpaca 데이터 제공자 (성능 개선)
     """
     
     def __init__(self):
@@ -54,10 +54,10 @@ class AlpacaDataProvider(AbstractDataProvider):
             secret_key=settings.ALPACA_SECRET_KEY,
             paper=True,
         )
-        logger.info("Alpaca clients initialized: Data API + Paper Trading")
+        logger.info("Alpaca 클라이언트 초기화: 데이터 API 및 페이퍼 트레이딩")
 
     async def get_current_price(self, symbol: str) -> float:
-        """Get latest price (no cache - real-time needed)."""
+        """최신 가격 조회 (캐시 없음 - 실시간 필요)"""
         try:
             loop = asyncio.get_event_loop()
             
@@ -80,8 +80,8 @@ class AlpacaDataProvider(AbstractDataProvider):
             price = await loop.run_in_executor(None, _fetch)
             return price
             
-        except Exception as e:
-            logger.error(f"Failed to get price for {symbol}: {e}")
+            except Exception as e:
+            logger.error(f"{symbol} 가격 조회 실패: {e}")
             return 0.0
 
     async def get_historical_data(
@@ -105,11 +105,11 @@ class AlpacaDataProvider(AbstractDataProvider):
                 cached = cache.get_ohlcv(symbol, days)
                 
             if cached:
-                logger.debug(f"Cache HIT: {symbol} {days} days")
+                logger.debug(f"캐시 HIT: {symbol} {days}일")
                 return [StockOHLCVCreate(**item) for item in cached]
             
             # Cache miss - fetch from API
-            logger.debug(f"Cache MISS: {symbol} {days} days")
+            logger.debug(f"캐시 MISS: {symbol} {days}일")
             loop = asyncio.get_event_loop()
             
             def _fetch():
@@ -154,18 +154,18 @@ class AlpacaDataProvider(AbstractDataProvider):
                 cache_data = [item.model_dump() for item in data]
                 cache.set_ohlcv(symbol, days, cache_data, ttl=3600)
             
-            logger.info(f"Fetched {len(data)} bars for {symbol}")
+            logger.info(f"{symbol}에 대해 {len(data)}개 바를 가져왔습니다")
             return data
             
         except Exception as e:
-            logger.error(f"Failed to fetch history for {symbol}: {e}", exc_info=True)
+            logger.error(f"{symbol} 이력 조회 실패: {e}", exc_info=True)
             return []
 
     async def place_order(self, symbol: str, quantity: int, side: str) -> Optional[str]:
         """Place order and invalidate cache."""
         try:
             if quantity <= 0:
-                logger.warning(f"Invalid quantity {quantity} for {symbol}")
+                    logger.warning(f"잘못된 수량 {quantity} for {symbol}")
                 return None
             
             loop = asyncio.get_event_loop()
@@ -185,15 +185,15 @@ class AlpacaDataProvider(AbstractDataProvider):
             
             order_id = await loop.run_in_executor(None, _place)
             
-            # Invalidate cache for this symbol
+            # 심볼 관련 캐시 무효화
             cache.invalidate_symbol(symbol)
-            cache.delete("account:info")  # Account info changed
-            
-            logger.info(f"Order placed: {side} {quantity} {symbol}, ID: {order_id}")
+            cache.delete("account:info")  # 계정 정보 변경
+
+            logger.info(f"주문 실행: {side} {quantity} {symbol}, ID: {order_id}")
             return str(order_id)
             
         except Exception as e:
-            logger.error(f"Failed to place order for {symbol}: {e}", exc_info=True)
+            logger.error(f"{symbol} 주문 실패: {e}", exc_info=True)
             return None
     
     async def get_account_info(self) -> Dict[str, Any]:
@@ -202,10 +202,10 @@ class AlpacaDataProvider(AbstractDataProvider):
             # Try cache first
             cached = cache.get_account_info()
             if cached:
-                logger.debug("Cache HIT: account info")
+                logger.debug("캐시 HIT: 계정 정보")
                 return cached
-            
-            logger.debug("Cache MISS: account info")
+
+            logger.debug("캐시 MISS: 계정 정보")
             loop = asyncio.get_event_loop()
             
             def _fetch():
@@ -226,12 +226,12 @@ class AlpacaDataProvider(AbstractDataProvider):
             
             # Cache for 30 seconds
             cache.set_account_info(info, ttl=30)
-            
-            logger.info(f"Account info: ${info['buying_power']:.2f} buying power")
+
+            logger.info(f"계정 정보 가져옴: buying_power=${info['buying_power']:.2f}")
             return info
             
         except Exception as e:
-            logger.error(f"Failed to get account info: {e}", exc_info=True)
+            logger.error(f"계정 정보 조회 실패: {e}", exc_info=True)
             return {}
     
     async def get_position(self, symbol: str) -> Optional[Dict[str, Any]]:
@@ -240,10 +240,10 @@ class AlpacaDataProvider(AbstractDataProvider):
             # Try cache first
             cached = cache.get_position(symbol)
             if cached:
-                logger.debug(f"Cache HIT: position {symbol}")
+                logger.debug(f"캐시 HIT: 포지션 {symbol}")
                 return cached
             
-            logger.debug(f"Cache MISS: position {symbol}")
+            logger.debug(f"캐시 MISS: 포지션 {symbol}")
             loop = asyncio.get_event_loop()
             
             def _fetch():
@@ -264,14 +264,14 @@ class AlpacaDataProvider(AbstractDataProvider):
             
             position = await loop.run_in_executor(None, _fetch)
             
-            # Cache for 1 minute
+            # 1분 캐시
             if position:
                 cache.set_position(symbol, position, ttl=60)
             
             return position
             
         except Exception as e:
-            logger.error(f"Failed to get position for {symbol}: {e}", exc_info=True)
+            logger.error(f"{symbol} 포지션 조회 실패: {e}", exc_info=True)
             return None
     
     async def close_position(self, symbol: str, qty: Optional[int] = None) -> bool:
@@ -294,13 +294,13 @@ class AlpacaDataProvider(AbstractDataProvider):
             
             success = await loop.run_in_executor(None, _close)
             
-            # Invalidate cache
+            # 캐시 무효화
             cache.invalidate_symbol(symbol)
             cache.delete("account:info")
-            
-            logger.info(f"Closed position: {symbol} qty={qty or 'ALL'}")
+
+            logger.info(f"포지션 종료: {symbol} qty={qty or 'ALL'}")
             return success
             
         except Exception as e:
-            logger.error(f"Failed to close position {symbol}: {e}", exc_info=True)
+            logger.error(f"{symbol} 포지션 종료 실패: {e}", exc_info=True)
             return False

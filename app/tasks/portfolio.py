@@ -25,7 +25,7 @@ def get_portfolio_symbols():
         return symbols
     
     except Exception as e:
-        logger.error("Failed to fetch portfolio symbols: %s", str(e), exc_info=True)
+        logger.error("포트폴리오 심볼 조회 실패: %s", str(e), exc_info=True)
     finally:
         session.close()
 
@@ -41,7 +41,7 @@ def update_portfolio_parameters():
     
     충분한 거래 데이터 존재 시 백테스트에서 실시간 데이터로 자동 전환.
     """
-    logger.info("Starting daily portfolio parameter update")
+    logger.info("일일 포트폴리오 파라미터 업데이트 시작")
     
     session = SessionLocal()
     try:
@@ -59,7 +59,7 @@ def update_portfolio_parameters():
         account = trading_client.get_account()
         portfolio_value = float(account.portfolio_value)
         
-        logger.info("Portfolio value: $%.2f", portfolio_value)
+        logger.info("포트폴리오 가치: $%.2f", portfolio_value)
         symbols = get_portfolio_symbols()
         # 1. 상관 행렬 업데이트
         corr_matrix = optimizer.calculate_correlation_matrix(
@@ -67,7 +67,7 @@ def update_portfolio_parameters():
             symbols,
             use_live_data=True
         )
-        logger.info("Correlation matrix updated (%s)", str(corr_matrix.shape))
+        logger.info("상관행렬 업데이트 완료 (%s)", str(corr_matrix.shape))
         
         # 2. VaR 업데이트
         var = optimizer.calculate_var(
@@ -76,7 +76,7 @@ def update_portfolio_parameters():
             confidence=0.95,
             use_live_data=True
         )
-        logger.info("VaR (95%%) updated: $%.2f", var)
+        logger.info("VaR (95%%) 업데이트: $%.2f", var)
         
         # 3. Kelly 크기 업데이트
         for symbol in symbols:
@@ -85,12 +85,12 @@ def update_portfolio_parameters():
                 symbol,
                 use_live_data=True
             )
-            logger.info("%s Kelly: %.2f%%", symbol, kelly * 100)
+            logger.info("%s Kelly 비율: %.2f%%", symbol, kelly * 100)
         
-        logger.info("Portfolio parameters updated successfully")
+        logger.info("포트폴리오 파라미터 업데이트 완료")
         
     except Exception as e:
-        logger.error("Parameter update failed: %s", str(e), exc_info=True)
+        logger.error("파라미터 업데이트 실패: %s", str(e), exc_info=True)
     finally:
         session.close()
 
@@ -108,7 +108,7 @@ def rebalance_portfolio(force: bool = False):
     Args:
         force: True일 경우 드리프트와 무관하게 리밸런싱
     """
-    logger.info("Starting daily portfolio rebalancing")
+    logger.info("일일 포트폴리오 리밸런싱 시작")
     
     session = SessionLocal()
     try:
@@ -128,9 +128,9 @@ def rebalance_portfolio(force: bool = False):
         # 리밸런싱 실행
         rebalancer.rebalance(symbols, force=force)
         
-        logger.info("Portfolio rebalancing complete")
+        logger.info("포트폴리오 리밸런싱 완료")
         
     except Exception as e:
-        logger.error("Rebalancing failed: %s", str(e), exc_info=True)
+        logger.error("리밸런싱 실패: %s", str(e), exc_info=True)
     finally:
         session.close()

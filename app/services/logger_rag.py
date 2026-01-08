@@ -9,8 +9,8 @@ logger = logging.getLogger(__name__)
 
 class TradeDecisionLogger:
     """
-    Logs trade decisions to JSON files for RAG consumption.
-    Format: logs/trade_decisions/{date}/{symbol}_{uuid}.json
+    RAG용으로 거래 의사결정 로그를 JSON 파일로 저장합니다.
+    형식: logs/trade_decisions/{date}/{symbol}_{uuid}.json
     """
     
     def __init__(self, base_dir: str = "logs/trade_decisions"):
@@ -45,7 +45,7 @@ class TradeDecisionLogger:
             with open(filepath, "w", encoding="utf-8") as f:
                 json.dump(log_entry, f, indent=4, ensure_ascii=False)
             
-            logger.info(f"Logged trade decision for {symbol} to {filepath}")
+            logger.info(f"{symbol} 거래 결정 로그 저장: {filepath}")
 
         except Exception as e:
-            logger.error(f"Failed to log trade decision: {e}")
+            logger.error(f"거래 결정 로그 저장 실패: {e}")

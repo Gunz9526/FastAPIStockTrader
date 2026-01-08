@@ -10,10 +10,10 @@ logger = logging.getLogger(__name__)
 @celery_app.task(name="app.tasks.data_tasks.collect_fundamentals")
 def collect_fundamentals():
     """
-    Collect fundamental data from yfinance (SYNC VERSION).
-    Updates stock_fundamentals table.
+    yfinance에서 기본 재무데이터 수집 (동기 버전).
+    `stock_fundamentals` 테이블을 업데이트합니다.
     """
-    logger.info("Collecting fundamentals (sync)")
+    logger.info("재무지표 수집 시작 (동기)")
     
     session = SessionLocal()
     try:
@@ -26,10 +26,10 @@ def collect_fundamentals():
         symbols = [row[0] for row in result]
         
         if not symbols:
-            logger.warning("No symbols for fundamentals")
+            logger.warning("수집할 심볼이 없습니다")
             return
         
-        logger.info(f"Collecting fundamentals for {len(symbols)} symbols")
+        logger.info(f"총 {len(symbols)}개 심볼의 재무지표를 수집합니다")
         
         success_count = 0
         error_count = 0
@@ -71,15 +71,15 @@ def collect_fundamentals():
                     session.add(new_fundamental)
                 
                 success_count += 1
-                logger.debug(f"{symbol} fundamentals updated")
+                logger.debug(f"{symbol} 재무지표 업데이트됨")
                 
             except Exception as e:
                 error_count += 1
-                logger.error(f"Failed {symbol}: {e}")
+                logger.error(f"{symbol} 처리 실패: {e}")
                 continue
         
         session.commit()
-        logger.info(f"Fundamentals collection complete: {success_count} success, {error_count} errors")
+        logger.info(f"재무지표 수집 완료: 성공 {success_count}건, 오류 {error_count}건")
         
         return {
             'success': success_count,
@@ -88,7 +88,7 @@ def collect_fundamentals():
         }
         
     except Exception as e:
-        logger.error(f"Fundamentals error: {e}", exc_info=True)
+        logger.error(f"재무지표 수집 오류: {e}", exc_info=True)
         session.rollback()
         raise
     finally:

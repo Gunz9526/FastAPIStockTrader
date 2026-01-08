@@ -40,7 +40,7 @@ class SyncTradingStrategy:
             from app.services.fundamental_provider import get_fundamental_provider
             self.sentiment_analyzer = get_sentiment_analyzer()
             self.fundamental_provider = get_fundamental_provider()
-            logger.info("Sentiment & Fundamentals analyzers initialized")
+            logger.info("감성 및 펀더멘털 분석기 초기화됨")
         except (ImportError, AttributeError, ValueError) as e:
             logger.warning("Phase F analyzers 초기화 실패: %s", str(e))
             self.sentiment_analyzer = None
@@ -82,7 +82,7 @@ class SyncTradingStrategy:
             spy_data = self.repo.get_ohlcv_range('SPY', start_date, end_date, timeframe='15m')
             
             if len(spy_data) < 100:
-                logger.warning("Insufficient SPY data for regime detection")
+                logger.warning("레짐 감지를 위한 SPY 데이터 부족")
                 return
             
             # Convert to DataFrame
@@ -178,7 +178,7 @@ class SyncTradingStrategy:
             self._execute_trade_logic(symbol, prediction, df.iloc[-1]['close'])
             
         except Exception as e:
-            logger.error(f"Error processing {symbol}: {e}")
+            logger.error(f"{symbol} 처리 중 오류: {e}")
 
     def _execute_trade_logic(self, symbol: str, prediction: float, current_price: float):
         """
@@ -200,12 +200,12 @@ class SyncTradingStrategy:
         sell_threshold = -0.002
         
         logger.info(
-            "%s [15m] ML: %.5f | Sentiment: %.2f | 조정: %.5f | 가격: %s",
+            "%s [15m] ML예측: %.5f | 감성: %.2f | 조정: %.5f | 가격: %s",
             symbol, prediction, sentiment_score, adjusted_prediction, current_price
         )
         
         if self.api is None:
-            logger.warning("Alpaca API not initialized, skipping trade")
+            logger.warning("Alpaca API 미초기화 — 주문 생략")
             return
 
         # 조정된 예측 사용

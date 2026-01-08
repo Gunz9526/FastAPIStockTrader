@@ -119,8 +119,13 @@ def _load_and_prepare_data(
         logger.error("No data loaded for any symbol")
         return pd.DataFrame(), pd.Series(), []
     
-    X = pd.concat(all_X, ignore_index=True)
-    y = pd.concat(all_y, ignore_index=True)
+    # Preserve datetime index instead of resetting to integer
+    X = pd.concat(all_X, ignore_index=False)
+    y = pd.concat(all_y, ignore_index=False)
+    
+    # Sort by index to maintain chronological order
+    X = X.sort_index()
+    y = y.sort_index()
     
     if classify_regime:
         logger.info("데이터를 시장 레짐별로 분류 중...")
@@ -152,6 +157,7 @@ def _load_and_prepare_data(
             
             # SPY DataFrame 생성
             spy_df = pd.DataFrame([{
+                'symbol': bar.symbol,
                 'date_time': bar.date_time,
                 'open': bar.open,
                 'high': bar.high,
@@ -165,13 +171,26 @@ def _load_and_prepare_data(
             # SPY 피처 생성 (레짐 감지용)
             spy_features = feature_engineer.create_features(spy_df)
             
+            # Load VIX data from Redis cache for regime detection
+            vix_value = None
+            try:
+                from app.core.cache import cache
+                vix_cached = cache.get("vix:latest")
+                if vix_cached:
+                    vix_value = float(vix_cached)
+                    logger.info(f"VIX from cache: {vix_value:.2f}")
+                else:
+                    logger.warning("VIX not available in cache (training may use ATR-only regime detection)")
+            except Exception as e:
+                logger.debug(f"Failed to fetch VIX: {e}")
+            
             # 각 타임스탬프별로 레짐 분류
             regimes = []
             for idx in X.index:
                 # 가장 가까운 SPY 타임스탬프 찾기
                 spy_window = spy_features[spy_features.index <= idx]
                 if len(spy_window) > 0:
-                    regime = regime_detector.detect_regime(spy_window)
+                    regime = regime_detector.detect_regime(spy_window, vix_value=vix_value)
                     regimes.append(regime.value)
                 else:
                     regimes.append(MarketRegime.SIDEWAYS_CALM.value)  # 기본값
@@ -256,7 +275,7 @@ def train_models(self):
     Model training task with Walk-Forward validation.
     Uses shared data loading and robust multi-period validation.
     """
-    logger.info("Starting model training with Walk-Forward validation...")
+    logger.info("워크포워드 검증을 사용한 모델 학습 시작...")
     
     session = SessionLocal()
     try:
@@ -267,10 +286,10 @@ def train_models(self):
         # 1. Load active symbols
         symbols = repo.get_active_symbols()
         if not symbols:
-            logger.warning("No active symbols found")
+            logger.warning("활성 심볼이 없습니다")
             return
         
-        logger.info(f"Training on {len(symbols)} symbols")
+        logger.info(f"{len(symbols)}개 심볼로 학습을 시작합니다")
         
         # 2. Load and prepare data using shared function
         end_date = pd.Timestamp.now(tz='UTC')
@@ -281,23 +300,23 @@ def train_models(self):
         )
         
         if X.empty:
-            logger.error("No training data collected")
+            logger.error("학습용 데이터를 수집하지 못했습니다")
             return
         
         # Data size validation
         if len(X) < 500:
-            logger.warning(f"Small dataset: {len(X)} samples. Consider longer backfill or more symbols.")
+            logger.warning(f"데이터셋이 작습니다: {len(X)} 샘플. 더 긴 백필 또는 심볼 확대를 고려하세요.")
         
-        logger.info(f"Total data: {len(X)} samples from {len(successful_symbols)} symbols")
+        logger.info(f"총 데이터: {len(X)} 샘플, {len(successful_symbols)}개 심볼로부터")
         
-        # Phase H.3: Train regime-specific models
+        # Phase H.3: 레짐별 모델 학습
         has_regime = 'regime' in X.columns
         
         if has_regime:
-            logger.info("Phase H.3: Training regime-specific models")
+            logger.info("단계 H.3: 레짐별 모델 학습 수행")
             _train_regime_specific_models(feature_engineer, X, y)
             session.commit()
-            logger.info("Training complete - regime-specific models saved")
+            logger.info("학습 완료 - 레짐별 모델이 저장되었습니다")
         else:
             logger.info("No regime classification, training generic model")
             # Fallback to old training logic (temporarily disabled)
@@ -319,10 +338,6 @@ def _train_regime_specific_models(
     """
     Train 4 regime-specific ensemble models.
     
-    Phase H.3 Implementation:
-    - Split data by market regime
-    - Train separate ensemble for each regime
-    - Save 4 model files: ensemble_model_{regime}.pkl
     
     Args:
         feature_engineer: Feature engineering instance
@@ -339,7 +354,7 @@ def _train_regime_specific_models(
             with open(best_params_path, 'r') as f:
                 tuning_config = json.load(f)
         except Exception as e:
-            logger.warning(f"Failed to load tuned params: {e}")
+            logger.warning(f"튜닝 파라미터 로드 실패: {e}")
     
     # Iterate through each regime
     for regime in MarketRegime:
@@ -396,7 +411,7 @@ def _train_regime_specific_models(
                 sharpe_ratios.append(max(sharpe, 0.1))
                 logger.info(f"  {name} | Sharpe: {sharpe:.4f}")
             except Exception as e:
-                logger.error(f"  ❌ Failed {name}: {e}", exc_info=True)
+                logger.error(f"  {name} 처리 실패: {e}", exc_info=True)
                 sharpe_ratios.append(0.1)
         
         # Normalize weights
@@ -417,7 +432,7 @@ def _train_regime_specific_models(
             logger.info(f"{regime_value.upper()} model saved: {model_filename}")
             
         except Exception as e:
-            logger.error(f"❌ Failed to train {regime_value} model: {e}", exc_info=True)
+            logger.error(f"{regime_value} 모델 학습 실패: {e}", exc_info=True)
     
     logger.info(f"\n{'='*60}")
     logger.info("Regime-specific training complete")
@@ -628,16 +643,12 @@ def tune_models(self):
         session.close()
 
 
-# ============================================================================
-# Phase F.4: Feature Importance Analysis
-# ============================================================================
 
 @celery_app.task(name="app.tasks.training.analyze_feature_importance", bind=True)
 def analyze_feature_importance(self, regime: str = None):
     """
     Analyze feature importance for trained models.
     
-    Phase F.4: Provides insights into which features contribute most to predictions.
     
     Args:
         regime: Specific regime to analyze (e.g., 'bull_trending', 'bear_trending')
@@ -664,14 +675,32 @@ def analyze_feature_importance(self, regime: str = None):
         
         # Load model
         from app.ml.models import EnsembleWrapper
-        ensemble = EnsembleWrapper.load(model_path)
+        ensemble = EnsembleWrapper()
+        ensemble.load(model_path)
+        
+        # Check if ensemble model was loaded successfully
+        if ensemble.model is None:
+            logger.error(f"앙상블 모델 로드 실패: {model_path}")
+            return {'status': 'error', 'message': '모델 로드 실패'}
+        
+        # Validate model structure
+        if not hasattr(ensemble.model, 'estimators_'):
+            logger.error("Loaded model does not have estimators_ attribute")
+            return {'status': 'error', 'message': 'Invalid model structure'}
+        
+        # Debug: Check estimators_ structure
+        logger.info(f"Number of estimators: {len(ensemble.model.estimators_)}")
+        logger.info(f"Estimator types: {[type(est).__name__ for est in ensemble.model.estimators_]}")
         
         # Extract feature importance from each base model
+        # VotingRegressor.estimators_ is a list of fitted estimators (not tuples)
         feature_names = None
         importance_scores = {}
         
-        for model_name, model in zip(['catboost', 'lgbm', 'xgboost'], ensemble.models):
+        model_names = ['catboost', 'lgbm', 'xgboost']
+        for model_name, model in zip(model_names, ensemble.model.estimators_):
             if model is None:
+                logger.warning(f"{model_name} estimator is None")
                 continue
             
             # Get feature importance from tree-based model
@@ -682,6 +711,8 @@ def analyze_feature_importance(self, regime: str = None):
                 
                 importance_scores[model_name] = importances.tolist()
                 logger.info(f"{model_name} feature importances extracted: {len(importances)} features")
+            else:
+                logger.warning(f"{model_name} does not have feature_importances_ attribute")
         
         if not importance_scores:
             logger.warning("No feature importances found in models")
@@ -691,8 +722,11 @@ def analyze_feature_importance(self, regime: str = None):
         avg_importance = np.zeros(len(next(iter(importance_scores.values()))))
         total_weight = 0
         
+        # Get weights from ensemble (stored in metadata or use equal weights)
+        weights = ensemble.weights if ensemble.weights else [1/3, 1/3, 1/3]
+        
         for i, (model_name, importances) in enumerate(importance_scores.items()):
-            weight = ensemble.weights[i] if i < len(ensemble.weights) else 0.33
+            weight = weights[i] if i < len(weights) else 0.33
             avg_importance += np.array(importances) * weight
             total_weight += weight
         

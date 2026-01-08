@@ -10,11 +10,11 @@ logger = logging.getLogger(__name__)
 @celery_app.task(name="app.tasks.market_analysis.analyze_market")
 def analyze_market():
     """
-    Market-wide analysis task (SYNC VERSION).
-    Calculates aggregate metrics across all active symbols.
+    시장 전체 분석 태스크 (동기 버전).
+    활성 심볼 전체에 대한 집계 지표를 계산합니다.
     """
     logger.info("=" * 60)
-    logger.info("MARKET ANALYSIS STARTED")
+    logger.info("시장 분석 시작")
     logger.info("=" * 60)
     
     session = SessionLocal()
@@ -25,10 +25,10 @@ def analyze_market():
         symbols = repo.get_active_symbols()
         
         if not symbols:
-            logger.warning("No active symbols for analysis")
+            logger.warning("분석할 활성 심볼이 없습니다")
             return
         
-        logger.info(f"Analyzing {len(symbols)} symbols")
+        logger.info(f"{len(symbols)}개 심볼 분석 중")
         
         # Time range: last 30 days
         end_date = pd.Timestamp.now(tz='UTC')
@@ -52,8 +52,8 @@ def analyze_market():
                 # Get recent 15-minute OHLCV data
                 ohlcv = repo.get_ohlcv_range(symbol, start_date, end_date, timeframe='15m')
                 
-                if len(ohlcv) < 100:  # Need at least 100 bars for meaningful analysis
-                    logger.debug(f"Insufficient data for {symbol}")
+                if len(ohlcv) < 100:  # 의미 있는 분석을 위해 최소 100개 바 필요
+                    logger.debug(f"{symbol}: 데이터 부족")
                     continue
                 
                 # Convert to DataFrame
@@ -99,27 +99,27 @@ def analyze_market():
         
         # Log results
         logger.info("=" * 60)
-        logger.info("MARKET ANALYSIS RESULTS")
+        logger.info("시장 분석 결과")
         logger.info("=" * 60)
-        logger.info(f"Analyzed: {analysis_results['analyzed_symbols']}/{analysis_results['total_symbols']}")
-        logger.info(f"Avg Return (30d): {analysis_results['avg_return_pct']}%")
-        logger.info(f"Avg Volatility (annual): {analysis_results['avg_volatility']}")
-        logger.info(f"High Momentum: {len(analysis_results['high_momentum'])} symbols")
-        logger.info(f"Low Volatility: {len(analysis_results['low_volatility'])} symbols")
-        logger.info(f"High Volume: {len(analysis_results['high_volume'])} symbols")
+        logger.info(f"분석 완료: {analysis_results['analyzed_symbols']}/{analysis_results['total_symbols']}")
+        logger.info(f"평균 수익률 (30일): {analysis_results['avg_return_pct']}%")
+        logger.info(f"평균 변동성 (연율): {analysis_results['avg_volatility']}")
+        logger.info(f"상승 모멘텀 심볼 수: {len(analysis_results['high_momentum'])}개")
+        logger.info(f"저변동성 심볼 수: {len(analysis_results['low_volatility'])}개")
+        logger.info(f"고거래량 심볼 수: {len(analysis_results['high_volume'])}개")
         
         if analysis_results['high_momentum']:
-            logger.info(f"Top Gainers: {', '.join(analysis_results['high_momentum'][:5])}")
+            logger.info(f"상위 상승 종목: {', '.join(analysis_results['high_momentum'][:5])}")
         
         session.commit()
         logger.info("=" * 60)
-        logger.info("MARKET ANALYSIS COMPLETED")
+        logger.info("시장 분석 완료")
         logger.info("=" * 60)
         
         return analysis_results
         
     except Exception as e:
-        logger.error(f"Market analysis error: {e}", exc_info=True)
+        logger.error(f"시장 분석 오류: {e}", exc_info=True)
         session.rollback()
         raise
     finally:

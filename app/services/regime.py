@@ -6,7 +6,7 @@ from typing import Dict, Optional
 logger = logging.getLogger(__name__)
 
 class MarketRegime(str, Enum):
-    """Market regime classification."""
+    """시장 레짐 분류입니다."""
     BULL_TRENDING = "bull_trending"
     BEAR_TRENDING = "bear_trending"
     SIDEWAYS_VOLATILE = "sideways_volatile"
@@ -14,8 +14,7 @@ class MarketRegime(str, Enum):
 
 class RegimeDetector:
     """
-    Detect current market regime using multiple indicators.
-    
+    여러 지표를 사용해 현재 시장 레짐을 감지합니다.
     """
     
     def __init__(
@@ -89,12 +88,12 @@ class RegimeDetector:
             else:
                 regime = MarketRegime.SIDEWAYS_CALM
             
-            logger.info(
-                "레짐 감지: %s (ADX=%.1f, ATR%%=%.3f, VIX=%s, 트렌드=%s)",
-                regime.value, adx, atr_pct, 
-                f"{vix_value:.1f}" if vix_value else 'N/A',
-                'UP' if trend_up else 'DOWN'
-            )
+            # logger.info(
+            #     "레짐 감지: %s (ADX=%.1f, ATR%%=%.3f, VIX=%s, 트렌드=%s)",
+            #     regime.value, adx, atr_pct, 
+            #     f"{vix_value:.1f}" if vix_value else 'N/A',
+            #     'UP' if trend_up else 'DOWN'
+            # )
             
             return regime
             

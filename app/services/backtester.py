@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 class Backtester:
     """
-    Simulates trading strategy against historical data.
+    과거 데이터에 대해 트레이딩 전략을 시뮬레이션합니다.
     """
     def __init__(self, strategy_engine: TradingStrategyEngine, initial_capital: float = 100000.0):
         self.engine = strategy_engine
@@ -24,7 +24,7 @@ class Backtester:
         Replay history bar by bar using a sliding window.
         Strategy needs min ~50 bars for TA-Lib.
         """
-        logger.info(f"Starting Backtest for {symbol} with {len(data)} bars.")
+        logger.info(f"백테스트 시작: {symbol}, 바 수={len(data)}")
         
         df = pd.DataFrame([d.model_dump() for d in data])
         df.sort_values("date_time", inplace=True)
@@ -68,7 +68,7 @@ class Backtester:
             total_equity = self.capital + position_value
             self.equity_curve.append({"date": date, "equity": total_equity})
 
-        logger.info(f"Backtest Finished. Final Equity: {self.equity_curve[-1]['equity']}")
+        logger.info(f"백테스트 완료. 최종 자산: {self.equity_curve[-1]['equity']}")
         return self.equity_curve
 
 
@@ -78,10 +78,9 @@ class Backtester:
 
 class MonteCarloSimulator:
     """
-    Monte Carlo simulation for portfolio stress testing.
-    
-    Simulates thousands of possible future scenarios based on historical returns,
-    volatility, and correlations to assess portfolio risk.
+    포트폴리오 스트레스 테스트를 위한 몬테카를로 시뮬레이션.
+
+    과거 수익률, 변동성, 상관관계를 기반으로 여러 시나리오를 생성하여 위험을 평가합니다.
     """
     
     def __init__(self, num_simulations: int = 10000, time_horizon_days: int = 252):
@@ -122,7 +121,7 @@ class MonteCarloSimulator:
             - 'cvar_95': Conditional VaR (expected loss beyond VaR)
             - 'probability_of_loss': Probability of ending below initial value
         """
-        logger.info(f"Running Monte Carlo simulation: {self.num_simulations} paths, {self.time_horizon_days} days")
+        logger.info(f"몬테카를로 시뮬레이션 실행: 경로={self.num_simulations}, 기간={self.time_horizon_days}일")
         
         num_assets = len(expected_returns)
         
@@ -194,14 +193,14 @@ class MonteCarloSimulator:
         # Probability of loss
         probability_of_loss = np.sum(final_values < initial_value) / self.num_simulations
         
-        logger.info(f"Monte Carlo Results:")
-        logger.info(f"  Mean Final Value: ${mean_final_value:,.2f}")
-        logger.info(f"  Median Final Value: ${median_final_value:,.2f}")
-        logger.info(f"  5th Percentile: ${percentiles['5th']:,.2f}")
-        logger.info(f"  95th Percentile: ${percentiles['95th']:,.2f}")
+        logger.info("몬테카를로 결과:")
+        logger.info(f"  평균 최종값: ${mean_final_value:,.2f}")
+        logger.info(f"  중앙값: ${median_final_value:,.2f}")
+        logger.info(f"  5퍼센타일: ${percentiles['5th']:,.2f}")
+        logger.info(f"  95퍼센타일: ${percentiles['95th']:,.2f}")
         logger.info(f"  VaR (95%): ${var_95:,.2f}")
         logger.info(f"  CVaR (95%): ${cvar_95:,.2f}")
-        logger.info(f"  Probability of Loss: {probability_of_loss:.2%}")
+        logger.info(f"  손실 확률: {probability_of_loss:.2%}")
         
         return {
             'final_values': final_values.tolist(),
@@ -232,7 +231,7 @@ class MonteCarloSimulator:
         Returns:
             Same structure as simulate_portfolio
         """
-        logger.info(f"Running single-asset Monte Carlo: {self.num_simulations} paths")
+        logger.info(f"단일 자산 몬테카를로 실행: 경로={self.num_simulations}")
         
         final_values = np.zeros(self.num_simulations)
         
@@ -264,10 +263,10 @@ class MonteCarloSimulator:
         cvar_95 = initial_value - np.mean(losses_beyond_var) if len(losses_beyond_var) > 0 else 0
         probability_of_loss = np.sum(final_values < initial_value) / self.num_simulations
         
-        logger.info(f"Single-Asset Monte Carlo Results:")
-        logger.info(f"  Mean Final Value: ${mean_final_value:,.2f}")
+        logger.info("단일 자산 몬테카를로 결과:")
+        logger.info(f"  평균 최종값: ${mean_final_value:,.2f}")
         logger.info(f"  VaR (95%): ${var_95:,.2f}")
-        logger.info(f"  Probability of Loss: {probability_of_loss:.2%}")
+        logger.info(f"  손실 확률: {probability_of_loss:.2%}")
         
         return {
             'final_values': final_values.tolist(),

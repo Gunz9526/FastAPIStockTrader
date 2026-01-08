@@ -1,12 +1,12 @@
 """
-Alpaca WebSocket Trade Updates Service
-Phase E.1: Real-time order status tracking via WebSocket
+Alpaca WebSocket 주문 업데이트 서비스
+Phase E.1: WebSocket을 통한 실시간 주문 상태 추적
 
-Purpose:
-- Replace polling with event-driven order updates
-- Reduce API calls (60/minute limit)
-- Faster order confirmation (<1 second vs 15-30 seconds)
-- Handle partial fills, rejections, cancellations in real-time
+목적:
+- 폴링을 이벤트 기반 업데이트로 대체
+- API 호출 감소 (60회/분 제한 고려)
+- 빠른 주문 확정 (<1초)
+- 부분 체결, 거부, 취소를 실시간 처리
 """
 import asyncio
 import logging
@@ -71,7 +71,7 @@ class AlpacaTradeStream:
         # Subscribe to trade updates
         self.stream.subscribe_trade_updates(self._handle_trade_update)
         
-        logger.info("Alpaca Trade Stream initialized")
+        logger.info("Alpaca Trade Stream 초기화 완료")
     
     async def _handle_trade_update(self, data: TradeUpdate):
         """
@@ -92,7 +92,7 @@ class AlpacaTradeStream:
             logger.info(
                 f"[WEBSOCKET] {event.upper()}: {order.side} {order.qty} {symbol} "
                 f"@ ${order.filled_avg_price or order.limit_price or 'MARKET'} "
-                f"(Status: {order.status}, Order ID: {order.id})"
+                f"(상태: {order.status}, 주문ID: {order.id})"
             )
             
             # Handle different event types
@@ -105,24 +105,24 @@ class AlpacaTradeStream:
             elif event == 'canceled':
                 await self._handle_cancellation(data)
             elif event == 'new':
-                logger.info(f"✓ Order {order.id} submitted successfully")
+                logger.info(f"주문 제출됨: {order.id}")
             elif event == 'pending_new':
-                logger.debug(f"Order {order.id} pending on exchange")
+                logger.debug(f"주문 대기중: {order.id}")
             else:
-                logger.debug(f"Unhandled event: {event} for order {order.id}")
+                logger.debug(f"처리되지 않은 이벤트: {event} (주문 {order.id})")
         
         except Exception as e:
-            logger.error(f"Error handling trade update: {e}", exc_info=True)
+            logger.error(f"거래 업데이트 처리 오류: {e}", exc_info=True)
     
     async def _handle_fill(self, data: TradeUpdate):
-        """Handle fully filled orders."""
+        """완전 체결된 주문 처리"""
         order = data.order
         position_qty = data.position_qty
         
         logger.info(
-            f"✓ ORDER FILLED: {order.side} {order.filled_qty} {order.symbol} "
+            f"주문 체결: {order.side} {order.filled_qty} {order.symbol} "
             f"@ ${order.filled_avg_price:.2f} | "
-            f"Position now: {position_qty} shares"
+            f"현재 포지션: {position_qty} 주"
         )
         
         # Update position tracking in database
@@ -140,38 +140,35 @@ class AlpacaTradeStream:
                     execution_time=datetime.now()
                 )
                 
-                logger.info(f"Trade recorded in database: {order.id}")
+                logger.info(f"거래가 DB에 기록됨: {order.id}")
             except Exception as e:
-                logger.error(f"Failed to record trade {order.id}: {e}")
+                logger.error(f"거래 기록 실패 {order.id}: {e}")
         
         # Call user callback if provided
         if self.on_fill_callback:
             try:
                 await self.on_fill_callback(data)
             except Exception as e:
-                logger.error(f"Fill callback error: {e}", exc_info=True)
+                logger.error(f"Fill 콜백 오류: {e}", exc_info=True)
     
     async def _handle_partial_fill(self, data: TradeUpdate):
-        """Handle partially filled orders."""
+        """부분 체결된 주문 처리"""
         order = data.order
-        
         logger.warning(
-            f"⚠ PARTIAL FILL: {order.filled_qty}/{order.qty} {order.symbol} "
+            f"부분 체결: {order.filled_qty}/{order.qty} {order.symbol} "
             f"@ ${order.filled_avg_price:.2f} | "
-            f"Remaining: {float(order.qty) - float(order.filled_qty)}"
+            f"잔여: {float(order.qty) - float(order.filled_qty)}"
         )
         
         # Note: Position tracking updated when order fully fills
         # Partial fills don't trigger position closure checks
     
     async def _handle_rejection(self, data: TradeUpdate):
-        """Handle rejected orders."""
+        """거부된 주문 처리"""
         order = data.order
-        
         logger.error(
-            f"✗ ORDER REJECTED: {order.side} {order.qty} {order.symbol} | "
-            f"Reason: {order.status} | "
-            f"Order ID: {order.id}"
+            f"주문 거부: {order.side} {order.qty} {order.symbol} | "
+            f"사유: {order.status} | 주문ID: {order.id}"
         )
         
         # Call user callback if provided
@@ -179,16 +176,14 @@ class AlpacaTradeStream:
             try:
                 await self.on_reject_callback(data)
             except Exception as e:
-                logger.error(f"Reject callback error: {e}", exc_info=True)
+                logger.error(f"Reject 콜백 오류: {e}", exc_info=True)
     
     async def _handle_cancellation(self, data: TradeUpdate):
-        """Handle canceled orders."""
+        """취소된 주문 처리"""
         order = data.order
-        
         logger.warning(
-            f"⚠ ORDER CANCELED: {order.side} {order.qty} {order.symbol} | "
-            f"Filled: {order.filled_qty}/{order.qty} | "
-            f"Order ID: {order.id}"
+            f"주문 취소: {order.side} {order.qty} {order.symbol} | "
+            f"체결: {order.filled_qty}/{order.qty} | 주문ID: {order.id}"
         )
         
         # Call user callback if provided
@@ -196,7 +191,7 @@ class AlpacaTradeStream:
             try:
                 await self.on_cancel_callback(data)
             except Exception as e:
-                logger.error(f"Cancel callback error: {e}", exc_info=True)
+                logger.error(f"Cancel 콜백 오류: {e}", exc_info=True)
     
     def start(self):
         """
@@ -206,21 +201,21 @@ class AlpacaTradeStream:
         For Celery workers, use a background thread.
         """
         try:
-            logger.info("Starting Alpaca Trade Stream...")
+            logger.info("Alpaca Trade Stream 시작")
             self.stream.run()
         except KeyboardInterrupt:
-            logger.info("Trade stream stopped by user")
+            logger.info("사용자에 의해 Trade Stream 중단됨")
         except Exception as e:
-            logger.error(f"Trade stream error: {e}", exc_info=True)
+            logger.error(f"Trade stream 오류: {e}", exc_info=True)
             raise
     
     def stop(self):
         """Stop WebSocket connection gracefully."""
         try:
-            logger.info("Stopping Alpaca Trade Stream...")
+            logger.info("Alpaca Trade Stream 중지 중...")
             self.stream.stop()
         except Exception as e:
-            logger.error(f"Error stopping trade stream: {e}")
+            logger.error(f"Trade Stream 중지 오류: {e}")
 
 
 # Singleton instance

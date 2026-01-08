@@ -13,14 +13,14 @@ logger = logging.getLogger(__name__)
 
 class PortfolioOptimizer:
     """
-    Portfolio optimization using MPT, Kelly Criterion, and VaR.
-    
-    Features:
-    - Correlation matrix calculation (rolling 14-day window)
-    - Value-at-Risk (VaR) estimation (95% confidence)
-    - Kelly Criterion position sizing
-    - Sharpe ratio maximization (MPT)
-    - Auto-upgrade from backtest to live data
+    MPT, Kelly 기준 및 VaR을 사용하는 포트폴리오 최적화 도구입니다.
+
+    특징:
+    - 상관 행렬 계산 (롤링 14일 윈도우)
+    - Value-at-Risk (VaR) 추정 (95% 신뢰구간)
+    - Kelly 기준에 따른 포지션 사이징
+    - 샤프 비율 최대화 (MPT)
+    - 백테스트에서 라이브 데이터로 자동 전환
     """
     
     def __init__(self, lookback_days: int = 14, min_live_trades: int = 50):
@@ -59,7 +59,7 @@ class PortfolioOptimizer:
             cache_key = f"corr_matrix:{datetime.now().date()}"
             cached = cache.get(cache_key) if cache else None
             if cached:
-                logger.info("Correlation matrix loaded from cache")
+                logger.info("캐시에서 상관 행렬 로드됨")
                 return pd.read_json(StringIO(cached))
             
             # Decide data source
@@ -70,17 +70,17 @@ class PortfolioOptimizer:
                 use_live = False
             
             if use_live:
-                logger.info(f"실시간 거래 데이터 사용 ({live_trade_count} trades)")
+                logger.info(f"실거래 데이터 사용 ({live_trade_count} 건)")
                 returns_data = self._get_live_returns(repo, symbols)
             else:
-                logger.warning(f"Using BACKTEST data (live trades: {live_trade_count}/{self.min_live_trades})")
+                logger.warning(f"백테스트 데이터 사용 (실거래: {live_trade_count}/{self.min_live_trades})")
                 returns_data = self._get_backtest_returns(repo, symbols)
             
             # Calculate correlation
             # Align returns to same length (use shortest length)
             min_length = min(len(v) for v in returns_data.values())
             if min_length == 0:
-                logger.warning("No return data available, using identity matrix")
+                logger.warning("수익률 데이터 없음 — 단위 행렬을 사용합니다")
                 return pd.DataFrame(np.eye(len(symbols)), index=symbols, columns=symbols)
             
             aligned_returns = {k: v[:min_length] for k, v in returns_data.items()}
@@ -90,11 +90,11 @@ class PortfolioOptimizer:
             # Cache for 24 hours
             cache.set(cache_key, corr_matrix.to_json(), ttl_seconds=self.cache_ttl)
             
-            logger.info(f"Correlation matrix calculated ({min_length} samples):\n{corr_matrix}")
+            logger.info(f"상관 행렬 계산 완료 ({min_length} 샘플):\n{corr_matrix}")
             return corr_matrix
             
         except Exception as e:
-            logger.error(f"Correlation calculation failed: {e}", exc_info=True)
+            logger.error(f"상관 행렬 계산 실패: {e}", exc_info=True)
             # Return identity matrix as fallback (no correlation)
             return pd.DataFrame(np.eye(len(symbols)), index=symbols, columns=symbols)
     
@@ -162,17 +162,17 @@ class PortfolioOptimizer:
             cache_key = f"var:{datetime.now().date()}:{confidence}"
             cached = cache.get(cache_key)
             if cached:
-                logger.info("??VaR loaded from cache")
+                logger.info("캐시에서 VaR 로드됨")
                 return float(cached)
             
             # Get daily P&L data
             if use_live_data:
                 daily_returns = repo.get_daily_pnl(days=self.lookback_days)
-                if len(daily_returns) >= 7:  # At least 1 week
-                    logger.info(f"??VaR using LIVE data ({len(daily_returns)} days)")
+                if len(daily_returns) >= 7:  # 최소 1주
+                    logger.info(f"라이브 데이터로 VaR 계산 중 ({len(daily_returns)} 일)")
                     returns = daily_returns['daily_return'].values
                 else:
-                    logger.warning(f"?�️ VaR using BACKTEST data (live days: {len(daily_returns)})")
+                    logger.warning(f"백테스트 데이터로 VaR 계산 (라이브 일수: {len(daily_returns)})")
                     returns = self._get_backtest_portfolio_returns(repo)
             else:
                 returns = self._get_backtest_portfolio_returns(repo)
@@ -184,11 +184,11 @@ class PortfolioOptimizer:
             # Cache for 24 hours
             cache.set(cache_key, str(var_amount), ttl_seconds=self.cache_ttl)
             
-            logger.info(f"?�� VaR ({confidence:.0%}): ${var_amount:,.2f} (Portfolio: ${portfolio_value:,.0f})")
+            logger.info(f"VaR ({confidence:.0%}): ${var_amount:,.2f} (포트폴리오: ${portfolio_value:,.0f})")
             return var_amount
             
         except Exception as e:
-            logger.error(f"VaR calculation failed: {e}", exc_info=True)
+            logger.error(f"VaR 계산 실패: {e}", exc_info=True)
             # Conservative fallback: assume -3% daily risk
             return portfolio_value * -0.03
     
@@ -236,7 +236,7 @@ class PortfolioOptimizer:
             cache_key = f"kelly:{symbol}:{datetime.now().date()}"
             cached = cache.get(cache_key)
             if cached:
-                logger.info(f"??Kelly for {symbol} loaded from cache")
+                logger.info(f"{symbol}의 Kelly 지수 캐시 로드됨")
                 return float(cached)
             
             # Get trade history
@@ -245,16 +245,16 @@ class PortfolioOptimizer:
             
             if use_live_data:
                 trades = repo.get_trade_history(symbol, start_date, end_date)
-                if len(trades) >= 10:  # Minimum 10 trades for reliability
-                    logger.info(f"??Kelly using LIVE data ({len(trades)} trades)")
+                if len(trades) >= 10:  # 신뢰성을 위한 최소 거래 수
+                    logger.info(f"라이브 거래로 Kelly 계산 ({len(trades)} 건)")
                 else:
-                    logger.warning(f"?�️ Kelly using BACKTEST data (live trades: {len(trades)})")
+                    logger.warning(f"백테스트 데이터로 Kelly 계산 (실거래: {len(trades)} 건)")
                     trades = self._get_backtest_trades(repo, symbol)
             else:
                 trades = self._get_backtest_trades(repo, symbol)
             
             if len(trades) < 5:
-                logger.warning(f"{symbol}: Insufficient trade history, using conservative 10%")
+                logger.warning(f"{symbol}: 거래 이력 부족 — 보수적으로 10% 사용")
                 return 0.10
             
             # Calculate win rate and profit/loss ratio
@@ -279,12 +279,12 @@ class PortfolioOptimizer:
             
             logger.info(
                 f"{symbol} Kelly: {kelly_safe:.2%} "
-                f"(Win Rate: {win_rate:.1%}, P/L Ratio: {profit_loss_ratio:.2f})"
+                f"(승률: {win_rate:.1%}, 손익비: {profit_loss_ratio:.2f})"
             )
             return kelly_safe
             
         except Exception as e:
-            logger.error(f"Kelly calculation failed for {symbol}: {e}", exc_info=True)
+            logger.error(f"{symbol}의 Kelly 계산 실패: {e}", exc_info=True)
             return 0.10  # Conservative fallback
     
     def _get_backtest_trades(self, repo, symbol: str) -> List[Dict]:
@@ -382,13 +382,13 @@ class PortfolioOptimizer:
             
             if result.success:
                 weights_dict = {symbols[i]: result.x[i] for i in range(n_assets)}
-                logger.info(f"??MPT Optimized weights: {weights_dict}")
+                logger.info(f"MPT 최적화 가중치: {weights_dict}")
                 return weights_dict
             else:
-                logger.warning("MPT optimization failed, using equal weights")
+                logger.warning("MPT 최적화 실패 — 균등 가중치 사용")
                 return {s: 1.0 / n_assets for s in symbols}
             
         except Exception as e:
-            logger.error(f"Weight optimization failed: {e}", exc_info=True)
+            logger.error(f"가중치 최적화 실패: {e}", exc_info=True)
             # Fallback: equal weights
             return {s: 1.0 / len(symbols) for s in symbols}

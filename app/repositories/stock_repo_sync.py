@@ -85,8 +85,8 @@ class SyncStockRepository:
         position = PositionTracking(
             symbol=symbol,
             entry_time=entry_time,
-            entry_price=entry_price,
-            quantity=quantity
+            entry_price=float(entry_price),  # Convert NumPy types to native Python
+            quantity=int(quantity)
         )
         self.db.add(position)
         self.db.flush()
@@ -138,7 +138,7 @@ class SyncStockRepository:
         
         if position:
             position.exit_time = exit_time
-            position.exit_price = exit_price
+            position.exit_price = float(exit_price)  # Convert NumPy types to native Python
             self.db.flush()
         
         return position

@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 class RiskManager:
     """
-    Production-grade risk management with dynamic stops and position tracking.
+    운영 수준의 리스크 관리: 동적 스탑과 포지션 추적을 제공합니다.
     """
     
     def __init__(
@@ -68,7 +68,7 @@ class RiskManager:
             self.current_date = today
             self.daily_trades[today] = 0
             self.daily_pnl[today] = 0.0
-            logger.info(f"New trading day: {today}")
+            logger.info(f"새 거래일 시작: {today}")
 
     def apply_symbol_filters(self, symbol: str, price: float, volume: float) -> bool:
         """
@@ -77,17 +77,17 @@ class RiskManager:
         """
         # Blacklist
         if symbol in self.blacklist:
-            logger.info(f"Filtered {symbol}: blacklisted")
+            logger.info(f"필터됨 {symbol}: 블랙리스트")
             return False
         
         # Price range
         if price < self.min_price or price > self.max_price:
-            logger.info(f"Filtered {symbol}: price ${price:.2f} out of range")
+            logger.info(f"필터됨 {symbol}: 가격 ${price:.2f} 범위 외")
             return False
         
         # Volume
         if volume < self.min_volume:
-            logger.info(f"Filtered {symbol}: volume {volume:.0f} too low")
+            logger.info(f"필터됨 {symbol}: 거래량 {volume:.0f} 부족")
             return False
         
         return True
@@ -99,12 +99,12 @@ class RiskManager:
         
         # Trade count limit
         if self.daily_trades[today] >= self.max_trades_per_day:
-            logger.warning(f"Daily trade limit reached: {self.daily_trades[today]}")
+            logger.warning(f"일일 거래 한도 도달: {self.daily_trades[today]}")
             return False
         
         # Loss limit
         if self.daily_pnl[today] <= -self.daily_loss_limit:
-            logger.warning(f"Daily loss limit reached: ${self.daily_pnl[today]:.2f}")
+            logger.warning(f"일일 손실 한도 도달: ${self.daily_pnl[today]:.2f}")
             return False
         
         return True
@@ -151,10 +151,10 @@ class RiskManager:
             quantity = qty_simple
         
         if quantity < 1:
-            logger.warning(f"Insufficient funds for {symbol}: qty={quantity}")
+            logger.warning(f"{symbol}: 자금 부족 — 수량={quantity}")
             return False, 0
         
-        logger.info(f"Position size for {symbol}: {quantity} shares @ ${price:.2f}")
+        logger.info(f"{symbol} 포지션 사이즈: {quantity}주 @ ${price:.2f}")
         return True, quantity
 
     def calculate_exit_prices(
@@ -184,8 +184,8 @@ class RiskManager:
             trailing_stop = entry_price * 0.985  # 1.5%
         
         logger.info(
-            f"Exit prices: SL=${stop_loss:.2f}, TP=${take_profit:.2f}, "
-            f"Trail=${trailing_stop:.2f} (Entry=${entry_price:.2f})"
+            f"종료 가격: SL=${stop_loss:.2f}, TP=${take_profit:.2f}, "
+            f"후행스탑=${trailing_stop:.2f} (진입=${entry_price:.2f})"
         )
         
         return stop_loss, take_profit, trailing_stop
@@ -224,7 +224,7 @@ class RiskManager:
         updated_stop = max(current_trailing_stop, new_trailing)
         
         if updated_stop > current_trailing_stop:
-            logger.info(f"Trailing stop updated: ${current_trailing_stop:.2f} -> ${updated_stop:.2f}")
+            logger.info(f"후행스탑 업데이트: ${current_trailing_stop:.2f} -> ${updated_stop:.2f}")
         
         return updated_stop
 
@@ -313,7 +313,7 @@ class RiskManager:
         
         # Move to breakeven at 50% of profit target
         if profit_pct >= breakeven_threshold:
-            logger.info(f"Moving stop to breakeven: ${entry_price:.2f}")
+            logger.info(f"스탑을 브레이크이븐으로 이동: ${entry_price:.2f}")
             return entry_price
         
         return current_stop_loss
@@ -334,17 +334,17 @@ class RiskManager:
         
         if action == 'SELL' and realized_pl != 0:
             self.daily_pnl[today] += realized_pl
-            logger.info(f"Daily P&L: ${self.daily_pnl[today]:.2f} ({self.daily_trades[today]} trades)")
+            logger.info(f"일일 손익: ${self.daily_pnl[today]:.2f} ({self.daily_trades[today]} 건)")
 
     def add_to_blacklist(self, symbol: str):
         """Add symbol to blacklist."""
         self.blacklist.add(symbol)
-        logger.info(f"Added {symbol} to blacklist")
+        logger.info(f"{symbol}을(를) 블랙리스트에 추가함")
 
     def remove_from_blacklist(self, symbol: str):
         """Remove symbol from blacklist."""
         self.blacklist.discard(symbol)
-        logger.info(f"Removed {symbol} from blacklist")
+        logger.info(f"{symbol}을(를) 블랙리스트에서 제거함")
     
     def can_enter_position(self, symbol: str) -> Tuple[bool, str]:
         """
@@ -365,7 +365,7 @@ class RiskManager:
             now = datetime.now()
             if now < cooldown_end:
                 remaining_min = int((cooldown_end - now).total_seconds() / 60)
-                return False, f"COOLDOWN: {remaining_min}min remaining (ends {cooldown_end.strftime('%H:%M')})"
+                return False, f"COOLDOWN: {remaining_min}분 남음 (종료 {cooldown_end.strftime('%H:%M')})"
             else:
                 # Cooldown expired, remove from dict
                 del self.symbol_cooldowns[symbol]

@@ -1,8 +1,8 @@
 """
-Portfolio Rebalancer (Phase I.2)
+포트폴리오 리밸런서 (Phase I.2)
 
-Handles multi-position rebalancing based on MPT-optimized weights.
-Executes daily at 3:45 PM ET (15 min before market close).
+MPT 최적화 가중치 기반의 다중 포지션 리밸런싱을 처리합니다.
+매일 미국 동부시간 15:45(장 마감 15분 전)에 실행됩니다.
 """
 
 import logging
@@ -21,13 +21,13 @@ logger = logging.getLogger(__name__)
 
 class PortfolioRebalancer:
     """
-    Portfolio rebalancing service.
-    
-    Features:
-    - Daily rebalancing (3:45 PM ET)
-    - MPT-optimized weight calculation
-    - Drift-based triggering (only rebalance if weights drift >5%)
-    - Transaction cost awareness
+    포트폴리오 리밸런싱 서비스입니다.
+
+    특징:
+    - 일일 리밸런싱 (15:45 ET)
+    - MPT 기반 목표 가중치 계산
+    - 드리프트 기반 트리거(가중치 차이가 5% 초과 시 리밸런싱)
+    - 거래비용 고려
     """
     
     def __init__(self, api: TradingClient, repo: PortfolioRepository, optimizer: PortfolioOptimizer):
@@ -52,38 +52,38 @@ class PortfolioRebalancer:
             force: If True, rebalance regardless of drift
         """
         try:
-            logger.info(f"Starting portfolio rebalance for {len(symbols)} symbols")
+            logger.info(f"{len(symbols)}개 심볼에 대해 포트폴리오 리밸런싱 시작")
             
             # 1. Get current portfolio state
             account = self.api.get_account()
             portfolio_value = float(account.portfolio_value)
             current_positions = await self._get_current_positions()
             
-            logger.info(f"Portfolio value: ${portfolio_value:,.2f}")
-            logger.info(f"Current positions: {current_positions}")
+            logger.info(f"포트폴리오 가치: ${portfolio_value:,.2f}")
+            logger.info(f"현재 포지션: {current_positions}")
             
             # 2. Calculate target weights (MPT optimization)
             target_weights = await self.optimizer.optimize_weights(self.repo, symbols)
             
-            logger.info(f"Target weights: {target_weights}")
+            logger.info(f"목표 가중치: {target_weights}")
             
             # 3. Check if rebalancing needed
             current_weights = self._calculate_current_weights(current_positions, portfolio_value)
             max_drift = self._calculate_max_drift(current_weights, target_weights)
             
-            logger.info(f"Max weight drift: {max_drift:.2%}")
+            logger.info(f"최대 가중치 드리프트: {max_drift:.2%}")
             
             if not force and max_drift < self.min_rebalance_threshold:
-                logger.info(f"No rebalancing needed (drift {max_drift:.2%} < {self.min_rebalance_threshold:.2%})")
+                logger.info(f"리밸런싱 불필요 (드리프트 {max_drift:.2%} < {self.min_rebalance_threshold:.2%})")
                 return
             
             # 4. Execute rebalancing orders
             await self._execute_rebalancing(symbols, target_weights, portfolio_value, current_positions)
             
-            logger.info("Portfolio rebalancing complete")
+            logger.info("포트폴리오 리밸런싱 완료")
             
         except Exception as e:
-            logger.error(f"❌ Rebalancing failed: {e}", exc_info=True)
+            logger.error(f"리밸런싱 실패: {e}", exc_info=True)
     
     async def _get_current_positions(self) -> Dict[str, Dict]:
         """
@@ -106,7 +106,7 @@ class PortfolioRebalancer:
             return current
             
         except Exception as e:
-            logger.error(f"Failed to get current positions: {e}", exc_info=True)
+            logger.error(f"현재 포지션 조회 실패: {e}", exc_info=True)
             return {}
     
     def _calculate_current_weights(
@@ -167,11 +167,11 @@ class PortfolioRebalancer:
                 # Difference
                 diff_value = target_value - current_value
                 
-                logger.info(f"{symbol}: Current ${current_value:.0f} → Target ${target_value:.0f} (Diff: ${diff_value:+.0f})")
+                logger.info(f"{symbol}: 현재 ${current_value:.0f} → 목표 ${target_value:.0f} (차이: ${diff_value:+.0f})")
                 
                 # Skip if difference is too small
                 if abs(diff_value) < min_trade_value:
-                    logger.info(f"  Skipping {symbol} (difference < ${min_trade_value})")
+                    logger.info(f"  {symbol} 건너뜀 (차이 < ${min_trade_value})")
                     continue
                 
                 # Get current price from existing position or use market price
@@ -179,25 +179,25 @@ class PortfolioRebalancer:
                     # Use average entry price as estimate for current price
                     current_price = current_positions[symbol].get('avg_entry_price', 0.0)
                     if current_price <= 0:
-                        logger.warning(f"  Invalid price data for {symbol}")
+                        logger.warning(f"  잘못된 가격 데이터 {symbol}")
                         continue
                 else:
                     # For new positions, we need to get price from DB or skip
                     # This should be handled by data provider in production
-                    logger.warning(f"  No price data for new symbol {symbol}, skipping")
+                    logger.warning(f"  신규 심볼 {symbol}에 대한 가격 데이터 없음 — 건너뜀")
                     continue
                 
                 # Calculate quantity
                 qty = int(abs(diff_value) / current_price)
                 
                 if qty == 0:
-                    logger.info(f"  Quantity too small for {symbol}")
+                    logger.info(f"  {symbol}: 주문 수량 부족")
                     continue
                 
                 # Execute order
                 if diff_value > 0:
                     # BUY
-                    logger.info(f"  BUY {qty} shares of {symbol} @ ${current_price:.2f}")
+                    logger.info(f"  BUY {symbol} {qty}주 @ ${current_price:.2f}")
                     order_data = MarketOrderRequest(
                         symbol=symbol,
                         qty=qty,
@@ -205,10 +205,10 @@ class PortfolioRebalancer:
                         time_in_force=TimeInForce.DAY
                     )
                     order = self.api.submit_order(order_data=order_data)
-                    logger.info(f"  Order placed: {order.id}")
+                    logger.info(f"  주문 접수: {order.id}")
                 else:
                     # SELL
-                    logger.info(f"  SELL {qty} shares of {symbol} @ ${current_price:.2f}")
+                    logger.info(f"  SELL {symbol} {qty}주 @ ${current_price:.2f}")
                     order_data = MarketOrderRequest(
                         symbol=symbol,
                         qty=qty,
@@ -216,10 +216,10 @@ class PortfolioRebalancer:
                         time_in_force=TimeInForce.DAY
                     )
                     order = self.api.submit_order(order_data=order_data)
-                    logger.info(f"  Order placed: {order.id}")
+                    logger.info(f"  주문 접수: {order.id}")
                 
             except Exception as e:
-                logger.error(f"  ❌ Failed to rebalance {symbol}: {e}")
+                logger.error(f"  리밸런싱 실패 {symbol}: {e}")
                 continue
     
     async def calculate_target_weights(self, symbols: List[str]) -> Dict[str, float]:

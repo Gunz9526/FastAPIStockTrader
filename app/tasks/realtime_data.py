@@ -1,6 +1,6 @@
 """
-Real-time 15-minute OHLCV data collection with VWAP.
-Collects data during market hours for active trading.
+실시간 15분 OHLCV 데이터 수집 및 VWAP 계산.
+활성 거래 심볼에 대해 장중에 데이터를 수집합니다.
 """
 import logging
 from app.worker import celery_app
@@ -18,10 +18,10 @@ logger = logging.getLogger(__name__)
 @celery_app.task(name="app.tasks.realtime_data.collect_15m_realtime")
 def collect_15m_realtime():
     """
-    Collect 15-minute OHLCV + VWAP data in real-time.
-    Runs every 15 minutes during market hours (9:30 AM - 4:00 PM ET).
+    실시간으로 15분 OHLCV 및 VWAP 데이터를 수집합니다.
+    장중(ET 기준 9:30 - 16:00) 15분 간격으로 실행됩니다.
     """
-    logger.info("Starting 15m real-time data collection...")
+    logger.info("15분 실시간 데이터 수집 시작...")
     
     # Check if market is currently open
     et_tz = timezone('America/New_York')
@@ -33,15 +33,15 @@ def collect_15m_realtime():
     # Market hours: Mon-Fri, 9:30 AM - 4:00 PM ET (14:30-21:00 UTC roughly, but using local)
     # Simplified check: Hour 9-15 on weekdays
     if day_of_week > 4:  # Weekend
-        logger.info("Market closed (weekend). Skipping 15m collection.")
+        logger.info("시장 휴장(주말). 15분 수집 건너뜁니다.")
         return {"status": "skipped", "reason": "weekend"}
     
     if current_hour < 9 or (current_hour == 9 and current_minute < 30):
-        logger.info("Market not yet open. Skipping 15m collection.")
+        logger.info("시장 미개장. 15분 수집 건너뜁니다.")
         return {"status": "skipped", "reason": "pre-market"}
     
     if current_hour >= 16:
-        logger.info("Market already closed. Skipping 15m collection.")
+        logger.info("시장 마감 이후. 15분 수집 건너뜁니다.")
         return {"status": "skipped", "reason": "post-market"}
     
     session = SessionLocal()
@@ -51,10 +51,10 @@ def collect_15m_realtime():
         # Get active symbols
         symbols = repo.get_active_symbols()
         if not symbols:
-            logger.warning("No active symbols for 15m collection")
+            logger.warning("15분 수집 대상 활성 심볼이 없습니다")
             return {"status": "no_symbols"}
         
-        logger.info(f"Collecting 15m data for {len(symbols)} symbols")
+        logger.info(f"{len(symbols)}개 심볼에 대해 15분 데이터 수집 중")
         
         # Initialize Alpaca client
         data_client = StockHistoricalDataClient(
@@ -82,12 +82,12 @@ def collect_15m_realtime():
                 bars_response = data_client.get_stock_bars(request)
                 
                 if not bars_response or not bars_response.data:
-                    logger.debug(f"{symbol}: No 15m data returned")
+                    logger.debug(f"{symbol}: 15분 데이터 없음")
                     continue
                 
                 symbol_bars = bars_response.data.get(symbol, [])
                 if not symbol_bars:
-                    logger.debug(f"{symbol}: Empty bar list")
+                    logger.debug(f"{symbol}: 바 목록 비어있음")
                     continue
                 
                 # Process each bar
@@ -130,15 +130,15 @@ def collect_15m_realtime():
                         inserted_bars += 1
                 
                 success_count += 1
-                logger.debug(f"{symbol}: {inserted_bars} new bars, {updated_bars} updated bars")
+                logger.debug(f"{symbol}: 신규 {inserted_bars}개, 갱신 {updated_bars}개")
                 
             except Exception as e:
                 error_count += 1
-                logger.error(f"Failed to collect 15m data for {symbol}: {e}")
+                logger.error(f"{symbol} 15분 데이터 수집 실패: {e}")
                 continue
         
         session.commit()
-        logger.info(f"15m collection complete: {success_count} success, {error_count} errors")
+        logger.info(f"15분 수집 완료: 성공 {success_count}건, 오류 {error_count}건")
         
         return {
             'status': 'completed',
@@ -148,7 +148,7 @@ def collect_15m_realtime():
         }
         
     except Exception as e:
-        logger.error(f"15m collection error: {e}", exc_info=True)
+        logger.error(f"15분 수집 오류: {e}", exc_info=True)
         session.rollback()
         raise
     finally:

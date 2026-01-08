@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Signal:
-    """Trading signal with strength and metadata."""
+    """거래 신호: 동작, 강도 및 메타데이터를 포함합니다."""
     action: str  # 'BUY', 'SELL', 'HOLD'
     strength: float  # 0.0 to 1.0
     price: float
@@ -19,7 +19,7 @@ class Signal:
     reason: str = ""
 
 class BaseStrategy(ABC):
-    """Base class for all trading strategies."""
+    """모든 트레이딩 전략의 기초 클래스입니다."""
     
     def __init__(self, name: str):
         self.name = name
@@ -48,8 +48,8 @@ class BaseStrategy(ABC):
 
 class MomentumStrategy(BaseStrategy):
     """
-    Momentum-based strategy using moving average crossovers and MACD.
-    Best for trending markets.
+    이동평균 교차와 MACD를 사용하는 모멘텀 기반 전략입니다.
+    트렌드 시장에서 유효합니다.
     """
     
     def __init__(self):
@@ -57,7 +57,7 @@ class MomentumStrategy(BaseStrategy):
     
     def generate_signal(self, df: pd.DataFrame) -> Signal:
         if df.empty or len(df) < 50:
-            return Signal('HOLD', 0.0, 0.0, reason="Insufficient data")
+            return Signal('HOLD', 0.0, 0.0, reason="데이터 부족")
         
         try:
             close = self._get_latest(df, 'close')
@@ -117,16 +117,16 @@ class MomentumStrategy(BaseStrategy):
                 )
             
             else:
-                return Signal('HOLD', 0.0, close, reason="No momentum signal")
+                return Signal('HOLD', 0.0, close, reason="모멘텀 신호 없음")
                 
         except Exception as e:
-            logger.error(f"Momentum strategy error: {e}", exc_info=True)
-            return Signal('HOLD', 0.0, 0.0, reason=f"Error: {e}")
+            logger.error(f"모멘텀 전략 오류: {e}", exc_info=True)
+            return Signal('HOLD', 0.0, 0.0, reason=f"오류: {e}")
 
 class MeanReversionStrategy(BaseStrategy):
     """
-    Mean reversion strategy using Bollinger Bands and RSI.
-    Best for range-bound markets.
+    볼린저 밴드와 RSI를 사용하는 평균회귀 전략입니다.
+    박스권(횡보) 시장에 적합합니다.
     """
     
     def __init__(self):
@@ -134,7 +134,7 @@ class MeanReversionStrategy(BaseStrategy):
     
     def generate_signal(self, df: pd.DataFrame) -> Signal:
         if df.empty or len(df) < 30:
-            return Signal('HOLD', 0.0, 0.0, reason="Insufficient data")
+            return Signal('HOLD', 0.0, 0.0, reason="데이터 부족")
         
         try:
             close = self._get_latest(df, 'close')
@@ -182,16 +182,16 @@ class MeanReversionStrategy(BaseStrategy):
                 )
             
             else:
-                return Signal('HOLD', 0.0, close, reason="No MR signal")
+                return Signal('HOLD', 0.0, close, reason="MR 신호 없음")
                 
         except Exception as e:
-            logger.error(f"Mean reversion strategy error: {e}", exc_info=True)
-            return Signal('HOLD', 0.0, 0.0, reason=f"Error: {e}")
+            logger.error(f"평균회귀 전략 오류: {e}", exc_info=True)
+            return Signal('HOLD', 0.0, 0.0, reason=f"오류: {e}")
 
 class BreakoutStrategy(BaseStrategy):
     """
-    Breakout strategy using ATR and volatility.
-    Catches strong movements after consolidation.
+    ATR과 변동성을 이용한 돌파 전략입니다.
+    횡보 구간 이후 강한 움직임을 포착합니다.
     """
     
     def __init__(self):
@@ -199,7 +199,7 @@ class BreakoutStrategy(BaseStrategy):
     
     def generate_signal(self, df: pd.DataFrame) -> Signal:
         if df.empty or len(df) < 30:
-            return Signal('HOLD', 0.0, 0.0, reason="Insufficient data")
+            return Signal('HOLD', 0.0, 0.0, reason="데이터 부족")
         
         try:
             close = self._get_latest(df, 'close')
@@ -252,15 +252,15 @@ class BreakoutStrategy(BaseStrategy):
                 )
             
             else:
-                return Signal('HOLD', 0.0, close, reason="No breakout")
+                return Signal('HOLD', 0.0, close, reason="돌파 신호 없음")
                 
         except Exception as e:
-            logger.error(f"Breakout strategy error: {e}", exc_info=True)
-            return Signal('HOLD', 0.0, 0.0, reason=f"Error: {e}")
+            logger.error(f"돌파 전략 오류: {e}", exc_info=True)
+            return Signal('HOLD', 0.0, 0.0, reason=f"오류: {e}")
 
 class MLStrategy(BaseStrategy):
     """
-    Machine Learning based strategy using ensemble model predictions.
+    앙상블 모델 예측을 사용하는 머신러닝 기반 전략입니다.
     """
     
     def __init__(self, predictor_service):
@@ -269,7 +269,7 @@ class MLStrategy(BaseStrategy):
     
     def generate_signal(self, df: pd.DataFrame) -> Signal:
         if df.empty:
-            return Signal('HOLD', 0.0, 0.0, reason="No data")
+            return Signal('HOLD', 0.0, 0.0, reason="데이터 없음")
         
         try:
             # Get latest features (already normalized from FeatureEngineer)
@@ -295,8 +295,8 @@ class MLStrategy(BaseStrategy):
                     reason=f"ML SELL: Score={prediction:.3f}"
                 )
             else:
-                return Signal('HOLD', 0.0, close, reason=f"ML Neutral: {prediction:.3f}")
+                return Signal('HOLD', 0.0, close, reason=f"ML 중립: {prediction:.3f}")
                 
         except Exception as e:
-            logger.error(f"ML strategy error: {e}", exc_info=True)
-            return Signal('HOLD', 0.0, 0.0, reason=f"Error: {e}")
+            logger.error(f"ML 전략 오류: {e}", exc_info=True)
+            return Signal('HOLD', 0.0, 0.0, reason=f"오류: {e}")

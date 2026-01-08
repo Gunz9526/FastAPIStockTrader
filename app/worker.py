@@ -59,13 +59,13 @@ celery_app.conf.beat_schedule = {
         "schedule": crontab(minute="*/15", hour="9-16", day_of_week="1-5"),
     },
     
-    # [Phase G] Real-time 15-minute OHLCV Collection (Every 15 minutes during market hours)
+    # Real-time 15-minute OHLCV Collection (Every 15 minutes during market hours)
     "collect_15m_realtime": {
         "task": "app.tasks.realtime_data.collect_15m_realtime",
         "schedule": crontab(minute="0,15,30,45", hour="9-15", day_of_week="1-5"),
     },
     
-    # [Phase I.2] Daily Portfolio Parameter Update (Midnight EST, every day)
+    # Daily Portfolio Parameter Update (Midnight EST, every day)
     # Auto-calculates: correlation matrix, VaR, Kelly sizes
     # Uses live data if available (50+ trades), else backtest data
     "update_portfolio_parameters": {
@@ -73,21 +73,21 @@ celery_app.conf.beat_schedule = {
         "schedule": crontab(minute="0", hour="0", day_of_week="1-5"),
     },
     
-    # [Phase I.2] Daily Portfolio Rebalancing (3:45 PM EST, 15 min before close)
+    # Daily Portfolio Rebalancing (3:45 PM EST, 15 min before close)
     # MPT optimization, only rebalances if drift > 5%
     "rebalance_portfolio": {
         "task": "app.tasks.portfolio.rebalance_portfolio",
         "schedule": crontab(minute="45", hour="15", day_of_week="1-5"),
     },
     
-    # [Phase F.1] Hourly Sentiment Analysis Update (Every hour, 24/7)
+    # Hourly Sentiment Analysis Update (Every hour, 24/7)
     # Fetches news from API, analyzes with Gemini, caches in Redis
     "update_sentiment_scores": {
         "task": "app.tasks.sentiment.update_sentiment_scores",
-        "schedule": crontab(minute="30", hour="9-15", day_of_week="1-5"),
+        "schedule": crontab(minute="0", hour="9-15", day_of_week="1-5"),
     },
     
-    # [Phase F.1] Daily Sentiment Cache Cleanup (Midnight EST)
+    # Daily Sentiment Cache Cleanup (Midnight EST)
     # Optional: Redis TTL handles expiration automatically
     "clear_stale_sentiment_cache": {
         "task": "app.tasks.sentiment.clear_stale_sentiment_cache",
@@ -100,7 +100,7 @@ celery_app.conf.beat_schedule = {
         "schedule": crontab(minute="0", hour="6", day_of_week="1-6"),
     },
     
-    # [Phase F.3] Daily VIX Collection (6:30 AM EST before market open)
+    # Daily VIX Collection (6:30 AM EST before market open)
     # Fetch VIX (Volatility Index) for regime detection enhancement
     "collect_vix_data": {
         "task": "app.tasks.vix_data.collect_vix_data",

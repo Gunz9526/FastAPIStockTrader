@@ -1,6 +1,6 @@
 """
-Fundamental Data Provider
-Phase F.2: Fetch fundamental metrics using yfinance API
+기초재무 데이터 제공자
+Phase F.2: yfinance API를 사용한 재무지표 수집
 """
 import logging
 from typing import Dict, Optional
@@ -13,15 +13,15 @@ logger = logging.getLogger(__name__)
 
 class FundamentalDataProvider:
     """
-    Fetch fundamental metrics from yfinance.
-    
-    Metrics:
-    - P/E Ratio (Price-to-Earnings): Valuation metric
-    - P/B Ratio (Price-to-Book): Asset valuation
-    - ROE (Return on Equity): Profitability metric
-    - Dividend Yield: Income metric
-    - Market Cap: Company size
-    - Beta: Volatility vs market
+    yfinance에서 기본 재무지표를 가져옵니다.
+
+    지표:
+    - P/E: 주가수익비율
+    - P/B: 주가순자산비율
+    - ROE: 자기자본이익률
+    - 배당수익률
+    - 시가총액
+    - 베타
     """
     
     def __init__(self):
@@ -63,11 +63,11 @@ class FundamentalDataProvider:
                 'updated_at': datetime.now()
             }
             
-            logger.info(f"Fetched fundamentals for {symbol}: PE={fundamentals['pe_ratio']}, PB={fundamentals['pb_ratio']}")
+            logger.info(f"{symbol} 재무지표 수집됨: PE={fundamentals['pe_ratio']}, PB={fundamentals['pb_ratio']}")
             return fundamentals
         
         except Exception as e:
-            logger.error(f"Failed to fetch fundamentals for {symbol}: {e}")
+            logger.error(f"{symbol} 재무지표 수집 실패: {e}")
             return {
                 'pe_ratio': None,
                 'pb_ratio': None,
@@ -121,7 +121,7 @@ class FundamentalDataProvider:
         
         is_value = pe < pe_threshold and pb < pb_threshold
         
-        logger.debug(f"{symbol} value check: PE={pe:.2f}, PB={pb:.2f}, is_value={is_value}")
+        logger.debug(f"{symbol} 가치판단: PE={pe:.2f}, PB={pb:.2f}, is_value={is_value}")
         return is_value
     
     def is_growth_stock(self, symbol: str, roe_threshold: float = 0.15) -> bool:
@@ -145,7 +145,7 @@ class FundamentalDataProvider:
         
         is_growth = roe > roe_threshold
         
-        logger.debug(f"{symbol} growth check: ROE={roe:.2%}, is_growth={is_growth}")
+        logger.debug(f"{symbol} 성장판단: ROE={roe:.2%}, is_growth={is_growth}")
         return is_growth
     
     def is_income_stock(self, symbol: str, dividend_yield_threshold: float = 0.03) -> bool:
@@ -169,7 +169,7 @@ class FundamentalDataProvider:
         
         is_income = dividend_yield > dividend_yield_threshold
         
-        logger.debug(f"{symbol} income check: Div Yield={dividend_yield:.2%}, is_income={is_income}")
+        logger.debug(f"{symbol} 배당판단: Div Yield={dividend_yield:.2%}, is_income={is_income}")
         return is_income
     
     def get_stock_category(self, symbol: str) -> str:
@@ -226,10 +226,10 @@ class FundamentalDataProvider:
         
         try:
             score = (roe / pe) * (1 + div_yield) / beta
-            logger.debug(f"{symbol} risk-adjusted score: {score:.4f}")
+            logger.debug(f"{symbol} 위험조정 점수: {score:.4f}")
             return score
         except Exception as e:
-            logger.warning(f"Failed to calculate risk-adjusted score for {symbol}: {e}")
+            logger.warning(f"{symbol} 위험조정 점수 계산 실패: {e}")
             return None
 
 
