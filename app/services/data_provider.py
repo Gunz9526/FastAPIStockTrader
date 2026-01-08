@@ -80,7 +80,7 @@ class AlpacaDataProvider(AbstractDataProvider):
             price = await loop.run_in_executor(None, _fetch)
             return price
             
-            except Exception as e:
+        except Exception as e:
             logger.error(f"{symbol} 가격 조회 실패: {e}")
             return 0.0
 
@@ -165,7 +165,7 @@ class AlpacaDataProvider(AbstractDataProvider):
         """Place order and invalidate cache."""
         try:
             if quantity <= 0:
-                    logger.warning(f"잘못된 수량 {quantity} for {symbol}")
+                logger.warning(f"잘못된 수량 {quantity} for {symbol}")
                 return None
             
             loop = asyncio.get_event_loop()

@@ -151,9 +151,10 @@ class PortfolioRepository:
     
     def count_live_trades(self, days: int = 14) -> int:
         """
-        Count number of completed trades in the last N days.
+        Count number of live trades (both open and closed) in the last N days.
         
         Used to determine if enough live data exists for parameter calculation.
+        Counts trades by entry_time (includes open positions).
         
         Args:
             days: Number of days to count
@@ -164,21 +165,19 @@ class PortfolioRepository:
         try:
             cutoff_date = datetime.now() - timedelta(days=days)
             
+            # Count by entry_time (includes open positions with exit_time=NULL)
             query = select(func.count(PositionTracking.id)).where(
-                and_(
-                    PositionTracking.exit_time >= cutoff_date,
-                    PositionTracking.exit_time.isnot(None)
-                )
+                PositionTracking.entry_time >= cutoff_date
             )
             
             result = self.session.execute(query)
             count = result.scalar()
             
-            logger.info(f"Live trades in last {days} days: {count}")
+            logger.info("Live trades in last %d days: %d", days, count)
             return count
             
         except Exception as e:
-            logger.error(f"Failed to count live trades: {e}", exc_info=True)
+            logger.error("Failed to count live trades: %s", e, exc_info=True)
             return 0
     
     def get_all_active_positions(self) -> List[Dict]:
@@ -212,11 +211,11 @@ class PortfolioRepository:
                     'quantity': pos.quantity
                 })
             
-            logger.info(f"Active positions: {len(active)}")
+            logger.info("Active positions: %d", len(active))
             return active
             
         except Exception as e:
-            logger.error(f"Failed to get active positions: {e}", exc_info=True)
+            logger.error("Failed to get active positions: %s", e, exc_info=True)
             return []
     
     def get_ohlcv_range(
@@ -253,11 +252,11 @@ class PortfolioRepository:
             result = self.session.execute(query)
             bars = result.scalars().all()
             
-            logger.info(f"Retrieved {len(bars)} {timeframe} bars for {symbol}")
+            logger.info("Retrieved %d %s bars for %s", len(bars), timeframe, symbol)
             return bars
             
         except Exception as e:
-            logger.error(f"Failed to get OHLCV for {symbol}: {e}", exc_info=True)
+            logger.error("Failed to get OHLCV for %s: %s", symbol, e, exc_info=True)
             return []
     
     def get_portfolio_value(self) -> float:

@@ -285,7 +285,7 @@ Response format (JSON only, no markdown):
         
         try:
             response = self.gemini_client.models.generate_content(
-                model='gemini-2.0-flash-exp',  # Larger context window for batch
+                model='gemini-2.5-flash-lite',  # Stable model with better quota
                 contents=batch_prompt
             )
             result_text = response.text.strip()

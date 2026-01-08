@@ -136,18 +136,12 @@ def _load_and_prepare_data(
             # SPY 15분봉 데이터 확인
             spy_ohlcv = repo.get_ohlcv_range('SPY', start_date, end_date, timeframe='15m')
             
-            # SPY 데이터 부족 시 경고 및 SPY도 symbol_subset에 포함
+            # SPY 데이터 부족 시 경고
             if len(spy_ohlcv) < 100:
                 logger.warning(
-                    "SPY 15분봉 데이터 부족 (%d bars). 레짐 분류를 위해 SPY도 학습에 포함합니다.",
+                    "SPY 15분봉 데이터 부족 (%d bars). SPY를 symbol_subset에 추가하여 백필하세요.",
                     len(spy_ohlcv)
                 )
-                # SPY가 symbol_subset에 없으면 추가
-                if 'SPY' not in symbol_subset:
-                    symbol_subset = ['SPY'] + list(symbol_subset)
-                    logger.info("SPY를 symbol 목록에 추가했습니다.")
-                    # SPY 데이터 다시 로드 (루프에서 처리됨)
-                    # 여기서는 경고만 하고, 실제 로드는 메인 루프에서
                 
                 # 그래도 데이터가 부족하면 기본 레짐 사용
                 if len(spy_ohlcv) < 50:
@@ -167,6 +161,7 @@ def _load_and_prepare_data(
             } for bar in spy_ohlcv])
             spy_df.set_index('date_time', inplace=True)
             spy_df.sort_index(inplace=True)
+            spy_df['symbol'] = 'SPY'
             
             # SPY 피처 생성 (레짐 감지용)
             spy_features = feature_engineer.create_features(spy_df)
@@ -178,22 +173,34 @@ def _load_and_prepare_data(
                 vix_cached = cache.get("vix:latest")
                 if vix_cached:
                     vix_value = float(vix_cached)
-                    logger.info(f"VIX from cache: {vix_value:.2f}")
+                    logger.info("VIX 캐시에서 로드: %.2f", vix_value)
                 else:
-                    logger.warning("VIX not available in cache (training may use ATR-only regime detection)")
+                    logger.warning("VIX 캐시 없음 (ATR 기반 레짐 감지 사용)")
             except Exception as e:
-                logger.debug(f"Failed to fetch VIX: {e}")
+                logger.debug("VIX 로드 실패: %s", e)
             
-            # 각 타임스탬프별로 레짐 분류
+            # SPY 레짐을 한 번에 계산 (타임스탬프별로 매핑)
+            # 각 타임스탬프에 대해 해당 시점까지의 SPY 데이터를 사용하여 레짐 감지
+            spy_regime_cache = {}  # 타임스탬프별 레짐 캐시
+            
+            logger.info("SPY 레짐 분류 시작 (총 %d 타임스탬프)", len(spy_features))
+            for spy_idx in spy_features.index:
+                spy_window = spy_features[spy_features.index <= spy_idx]
+                if len(spy_window) >= 50:  # 50개 바 확보 시에만 레짐 감지 (regime.py와 일치)
+                    regime = regime_detector.detect_regime(spy_window, vix_value=vix_value)
+                    spy_regime_cache[spy_idx] = regime.value
+                else:
+                    spy_regime_cache[spy_idx] = MarketRegime.SIDEWAYS_CALM.value
+            
+            # X의 각 인덱스에 가장 가까운 SPY 레짐 할당
             regimes = []
             for idx in X.index:
                 # 가장 가까운 SPY 타임스탬프 찾기
-                spy_window = spy_features[spy_features.index <= idx]
-                if len(spy_window) > 0:
-                    regime = regime_detector.detect_regime(spy_window, vix_value=vix_value)
-                    regimes.append(regime.value)
+                closest_spy_time = max([t for t in spy_regime_cache.keys() if t <= idx], default=None)
+                if closest_spy_time:
+                    regimes.append(spy_regime_cache[closest_spy_time])
                 else:
-                    regimes.append(MarketRegime.SIDEWAYS_CALM.value)  # 기본값
+                    regimes.append(MarketRegime.SIDEWAYS_CALM.value)
             
             X['regime'] = regimes
             regime_dist = pd.Series(regimes).value_counts().to_dict()
@@ -462,7 +469,7 @@ def tune_models(self):
         
         # Load data using shared function
         X, y, successful_symbols = _load_and_prepare_data(
-            repo, feature_engineer, symbols, start_date, end_date, symbol_limit=5  # Fewer for tuning
+            repo, feature_engineer, symbols, start_date, end_date, symbol_limit=None  # 모든 활성 심볼 사용
         )
         
         if X.empty:

@@ -165,7 +165,7 @@ async def backfill_ohlcv(years: int = BACKFILL_YEARS):
 
 async def verify_backfill():
     """백필 결과 검증"""
-    logger.info("🔍 Verifying backfill results...")
+    logger.info("Verifying backfill results...")
     
     async with AsyncSessionLocal() as db:
         result = await db.execute(
