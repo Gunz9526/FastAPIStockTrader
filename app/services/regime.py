@@ -41,7 +41,7 @@ class RegimeDetector:
             MarketRegime enum
         """
         if df.empty or len(df) < 50:
-            logger.warning("레짐 감지용 데이터 부족, SIDEWAYS_CALM으로 기본 설정")
+            logger.warning("레짐 감지용 데이터 부족 (%d개 바), SIDEWAYS_CALM으로 기본 설정", len(df))
             return MarketRegime.SIDEWAYS_CALM
         
         try:

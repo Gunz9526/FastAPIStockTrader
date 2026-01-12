@@ -179,31 +179,16 @@ def _load_and_prepare_data(
             except Exception as e:
                 logger.debug("VIX 로드 실패: %s", e)
             
-            # SPY 레짐을 한 번에 계산 (타임스탬프별로 매핑)
-            # 각 타임스탬프에 대해 해당 시점까지의 SPY 데이터를 사용하여 레짐 감지
-            spy_regime_cache = {}  # 타임스탬프별 레짐 캐시
+            # SPY 전체 데이터로 현재 시장 regime 감지
+            if len(spy_features) >= 50:
+                current_regime = regime_detector.detect_regime(spy_features, vix_value=vix_value)
+                logger.info("전체 기간 시장 레짐: %s", current_regime.value.upper())
+                X['regime'] = current_regime.value
+            else:
+                logger.warning("SPY features 부족 (%d개), SIDEWAYS_CALM으로 설정", len(spy_features))
+                X['regime'] = MarketRegime.SIDEWAYS_CALM.value
             
-            logger.info("SPY 레짐 분류 시작 (총 %d 타임스탬프)", len(spy_features))
-            for spy_idx in spy_features.index:
-                spy_window = spy_features[spy_features.index <= spy_idx]
-                if len(spy_window) >= 50:  # 50개 바 확보 시에만 레짐 감지 (regime.py와 일치)
-                    regime = regime_detector.detect_regime(spy_window, vix_value=vix_value)
-                    spy_regime_cache[spy_idx] = regime.value
-                else:
-                    spy_regime_cache[spy_idx] = MarketRegime.SIDEWAYS_CALM.value
-            
-            # X의 각 인덱스에 가장 가까운 SPY 레짐 할당
-            regimes = []
-            for idx in X.index:
-                # 가장 가까운 SPY 타임스탬프 찾기
-                closest_spy_time = max([t for t in spy_regime_cache.keys() if t <= idx], default=None)
-                if closest_spy_time:
-                    regimes.append(spy_regime_cache[closest_spy_time])
-                else:
-                    regimes.append(MarketRegime.SIDEWAYS_CALM.value)
-            
-            X['regime'] = regimes
-            regime_dist = pd.Series(regimes).value_counts().to_dict()
+            regime_dist = pd.Series(X['regime']).value_counts().to_dict()
             logger.info("레짐 분포: %s", regime_dist)
             
         except (ValueError, KeyError, AttributeError) as e:

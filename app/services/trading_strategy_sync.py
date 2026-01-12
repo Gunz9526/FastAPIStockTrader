@@ -71,9 +71,25 @@ class SyncTradingStrategy:
     def detect_market_regime(self):
         """
         SPY 데이터를 사용하여 현재 시장 레짐 감지.
-        Phase F.3: VIX 통합으로 강화.
         self.current_regime 업데이트.
+        
+        Redis 캐시 우선 확인 (5분 TTL) → 없으면 새로 계산
         """
+        try:
+            # Redis 캐시에서 먼저 확인
+            from app.core.cache import cache
+            cached_regime = cache.get("market:regime")
+            if cached_regime:
+                try:
+                    self.current_regime = MarketRegime(cached_regime)
+                    logger.debug("캐시된 레짐 사용: %s", cached_regime.upper())
+                    return
+                except ValueError:
+                    logger.warning("잘못된 캐시 레짐 값: %s", cached_regime)
+        except Exception as e:
+            logger.debug("Regime 캐시 확인 실패: %s", e)
+        
+        # 캐시 없음 → 새로 계산
         try:
             # 레짐 감지용 SPY 데이터 가져오기
             end_date = pd.Timestamp.now(tz='UTC')
@@ -119,7 +135,14 @@ class SyncTradingStrategy:
             regime = self.regime_detector.detect_regime(features_df, vix_value=vix_value)
             self.current_regime = regime
             
-            logger.info("시장 레짐: %s", regime.value.upper())
+            # Redis에 캐시 (5분 TTL - 15분봉이므로 충분)
+            try:
+                from app.core.cache import cache
+                cache.set("market:regime", regime.value, ttl_seconds=300)
+                logger.info("시장 레짐 감지 및 캐시: %s", regime.value.upper())
+            except Exception as cache_err:
+                logger.warning("Regime 캐시 실패: %s", cache_err)
+                logger.info("시장 레짐: %s", regime.value.upper())
             
         except (ValueError, KeyError, AttributeError) as e:
             logger.error("레짐 감지 오류: %s", str(e), exc_info=True)
