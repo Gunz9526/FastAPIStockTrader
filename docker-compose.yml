@@ -112,7 +112,9 @@ services:
       - FLOWER_UNAUTHENTICATED_API=true
     depends_on:
       - redis
-      - worker
+      - worker-trading
+      - worker-data
+      - worker-training
     restart: unless-stopped
 
 volumes:

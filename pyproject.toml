@@ -36,6 +36,9 @@ dependencies = [
     "yfinance>=0.2.0",
 ]
 
+[tool.setuptools]
+packages = ["app"]
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0.0",
@@ -51,12 +54,12 @@ build-backend = "setuptools.build_meta"
 
 [tool.ruff]
 line-length = 120
-target-version = "py310"
+target-version = "py314"
 select = ["E", "F", "I", "W", "C90", "B", "UP", "N", "SIM"]
 ignore = []
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.14"
 strict = true
 ignore_missing_imports = true
 
