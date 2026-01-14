@@ -236,7 +236,7 @@ async def get_trade_decisions_for_rag(
 
 @router.get("/positions")
 async def get_current_positions_for_rag(
-    status: Optional[str] = Query(default="OPEN"),
+    status: str | None = Query(default="OPEN"),
     db: AsyncSession = Depends(get_async_session)
 ):
     """
@@ -327,7 +327,7 @@ async def get_strategies_info_for_rag():
 
 @router.get("/trade-history")
 async def get_trade_history_for_rag(
-    symbol: Optional[str] = None,
+    symbol: str | None = None,
     days: int = Query(default=30, le=365),
     db: AsyncSession = Depends(get_async_session)
 ):
@@ -374,3 +374,22 @@ async def get_trade_history_for_rag(
     except Exception as e:
         logger.error(f"Error fetching trade history for RAG: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/available-symbols")
+async def get_available_symbols(
+    db: AsyncSession = Depends(get_async_session),
+    status: bool = Query(default=True)
+    ):
+    """
+    Get list of available stock symbols for trading.
+    """
+    stmt = select(StockTicker).where(StockTicker.is_active == status).order_by(StockTicker.symbol)
+    result = await db.execute(stmt)
+    tickers = result.scalars().all()
+
+    return {
+        "status_filter": status,
+        "symbols_count": len(tickers),
+        "symbols": [ticker.symbol for ticker in tickers]
+    }
