@@ -110,6 +110,37 @@ class SyncStockRepository:
         )
         return result.scalar_one_or_none()
     
+    def get_active_position_for_update(self, symbol: str) -> Optional[PositionTracking]:
+        """
+        Get active position with pessimistic lock (FOR UPDATE).
+        
+        This method acquires a row-level lock on the position record,
+        preventing other transactions from reading or modifying it
+        until this transaction completes.
+        
+        Use Case:
+            - Before updating exit_price/exit_time
+            - When checking position state before trade execution
+        
+        Args:
+            symbol: Stock symbol
+        
+        Returns:
+            Active PositionTracking with lock, or None if no active position
+            
+        Note:
+            MUST be used within a transaction. Call session.commit() or
+            session.rollback() to release the lock.
+        """
+        result = self.db.execute(
+            select(PositionTracking)
+            .where(PositionTracking.symbol == symbol)
+            .where(PositionTracking.exit_time.is_(None))
+            .order_by(PositionTracking.entry_time.desc())
+            .with_for_update()  # Pessimistic lock
+        )
+        return result.scalar_one_or_none()
+    
     def update_position_exit(
         self,
         position_id: int,

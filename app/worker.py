@@ -37,6 +37,31 @@ celery_app.conf.update(
     timezone="America/New_York",
     enable_utc=False,
     broker_connection_retry_on_startup=True,
+    # Queue separation for priority-based task routing
+    task_default_queue="data",
+    task_queues={
+        "trading": {"exchange": "trading", "routing_key": "trading"},
+        "data": {"exchange": "data", "routing_key": "data"},
+        "training": {"exchange": "training", "routing_key": "training"},
+    },
+    task_routes={
+        # HIGH PRIORITY: Real-time trading operations (< 1s latency tolerance)
+        "app.tasks.trading.execute_market_scan": {"queue": "trading"},
+        "app.tasks.trading.update_trailing_stops": {"queue": "trading"},
+        "app.tasks.portfolio.rebalance_portfolio": {"queue": "trading"},
+        "app.tasks.portfolio.update_portfolio_parameters": {"queue": "trading"},
+        # MEDIUM PRIORITY: Data collection (< 60s latency tolerance)
+        "app.tasks.realtime_data.collect_15m_realtime": {"queue": "data"},
+        "app.tasks.sentiment.update_sentiment_scores": {"queue": "data"},
+        "app.tasks.sentiment.clear_stale_sentiment_cache": {"queue": "data"},
+        "app.tasks.vix_data.collect_vix_data": {"queue": "data"},
+        "app.tasks.data_tasks.collect_fundamentals": {"queue": "data"},
+        "app.tasks.market_analysis.analyze_market": {"queue": "data"},
+        # LOW PRIORITY: Long-running training jobs (no latency requirement)
+        "app.tasks.training.train_models": {"queue": "training"},
+        "app.tasks.training.tune_models": {"queue": "training"},
+        "app.tasks.training.analyze_feature_importance": {"queue": "training"},
+    },
 )
 
 

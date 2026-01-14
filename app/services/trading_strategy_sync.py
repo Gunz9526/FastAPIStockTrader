@@ -35,6 +35,15 @@ class SyncTradingStrategy:
         self.current_regime = MarketRegime.SIDEWAYS_CALM  # 기본값
         self.risk_manager = RiskManager()  # Risk Management 활성화
         
+        # Circuit Breaker 초기화 (일일 손실, API 레이턴시, VIX 극단치 모니터링)
+        try:
+            from app.services.circuit_breaker import get_circuit_breaker
+            self.circuit_breaker = get_circuit_breaker()
+            logger.info("Circuit Breaker 초기화됨")
+        except (ImportError, Exception) as e:
+            logger.warning("Circuit Breaker 초기화 실패: %s", str(e))
+            self.circuit_breaker = None
+        
         try:
             from app.services.sentiment_analyzer import get_sentiment_analyzer
             from app.services.fundamental_provider import get_fundamental_provider
@@ -347,79 +356,132 @@ class SyncTradingStrategy:
         """
         Place real order via Alpaca API using alpaca-py.
         
+        Concurrency Control:
+            - Redis distributed lock prevents duplicate orders from parallel workers
+            - DB pessimistic lock (with_for_update) prevents dirty reads during position update
+        
+        Circuit Breaker Integration:
+            - track_api_call: API 레이턴시 추적
+            - record_trade_result: 거래 결과 기록 (성공/실패, 손익)
+        
         Args:
             symbol: Stock symbol
             side: 'buy' or 'sell'
             order_type: 'market' or 'limit'
             price: Current price (used for limit orders and buying power check)
         """
-        try:
-            qty = 1  # Fixed quantity for safety
+        # Import distributed lock for trading operations
+        from app.core.distributed_lock import get_trading_lock
+        
+        # Acquire distributed lock (30s TTL) to prevent race conditions
+        with get_trading_lock(symbol, ttl_seconds=30) as lock:
+            if not lock.acquired:
+                logger.warning("%s 락 획득 실패 - 주문 건너뛰기", symbol)
+                return
             
-            if side == "buy":
-                # 매수 가능 금액 확인
-                account = self.api.get_account()
-                if float(account.buying_power) < price * qty:
-                    logger.warning("%s 매수 가능 금액 부족", symbol)
-                    return
+            order_success = False
+            realized_pnl = 0.0
+            
+            try:
+                qty = 1  # Fixed quantity for safety
+                
+                if side == "buy":
+                    # 매수 가능 금액 확인
+                    account = self.api.get_account()
+                    if float(account.buying_power) < price * qty:
+                        logger.warning("%s 매수 가능 금액 부족", symbol)
+                        return
 
-            # Create order request object
-            order_side = OrderSide.BUY if side == "buy" else OrderSide.SELL
-            
-            if order_type == 'market':
-                order_data = MarketOrderRequest(
-                    symbol=symbol,
-                    qty=qty,
-                    side=order_side,
-                    time_in_force=TimeInForce.DAY
-                )
-            else:
-                order_data = LimitOrderRequest(
-                    symbol=symbol,
-                    qty=qty,
-                    side=order_side,
-                    time_in_force=TimeInForce.DAY,
-                    limit_price=price
-                )
-            
-            # 주문 제출
-            order = self.api.submit_order(order_data=order_data)
-            
-            logger.info("주문 실행: %s %s (ID: %s)", side.upper(), symbol, order.id)
-            
-            # Phase I.1: DB에 포지션 진입/종료 기록
-            if side == "buy":
-                from datetime import datetime
-                entry_time = datetime.now()
-                self.repo.record_position_entry(symbol, price, qty, entry_time)
-                self.risk_manager.record_position_entry(symbol, entry_time)
-                self.db.commit()
-            elif side == "sell":
-                active_position = self.repo.get_active_position(symbol)
-                if active_position:
-                    self.repo.update_position_exit(active_position.id, price)
-                    self.risk_manager.record_position_exit(symbol)
+                # Create order request object
+                order_side = OrderSide.BUY if side == "buy" else OrderSide.SELL
+                
+                if order_type == 'market':
+                    order_data = MarketOrderRequest(
+                        symbol=symbol,
+                        qty=qty,
+                        side=order_side,
+                        time_in_force=TimeInForce.DAY
+                    )
+                else:
+                    order_data = LimitOrderRequest(
+                        symbol=symbol,
+                        qty=qty,
+                        side=order_side,
+                        time_in_force=TimeInForce.DAY,
+                        limit_price=price
+                    )
+                
+                # 주문 제출 - Circuit Breaker로 API 레이턴시 추적
+                if self.circuit_breaker:
+                    with self.circuit_breaker.track_api_call():
+                        order = self.api.submit_order(order_data=order_data)
+                else:
+                    order = self.api.submit_order(order_data=order_data)
+                
+                logger.info("주문 실행: %s %s (ID: %s)", side.upper(), symbol, order.id)
+                order_success = True
+                
+                # Phase I.1: DB에 포지션 진입/종료 기록
+                # Use pessimistic lock for position updates
+                if side == "buy":
+                    from datetime import datetime
+                    entry_time = datetime.now()
+                    self.repo.record_position_entry(symbol, price, qty, entry_time)
+                    self.risk_manager.record_position_entry(symbol, entry_time)
                     self.db.commit()
-            
-        except Exception as e:
-            logger.error("%s 주문 실패: %s", symbol, str(e), exc_info=True) 
+                elif side == "sell":
+                    # Use with_for_update for safe position update
+                    active_position = self.repo.get_active_position_for_update(symbol)
+                    if active_position:
+                        # 손익 계산
+                        realized_pnl = (price - active_position.entry_price) * active_position.quantity
+                        self.repo.update_position_exit(active_position.id, price)
+                        self.risk_manager.record_position_exit(symbol)
+                        self.db.commit()
+                
+            except Exception as e:
+                logger.error("%s 주문 실패: %s", symbol, str(e), exc_info=True)
+                order_success = False
+            finally:
+                # Circuit Breaker에 거래 결과 기록
+                if self.circuit_breaker:
+                    self.circuit_breaker.record_trade_result(order_success, realized_pnl)
+     
     
     def process_portfolio(self, symbols: List[str]):
         """
         Process multiple symbols for multi-position portfolio trading (Phase I.2).
         
         Strategy:
-        1. Detect market regime
-        2. Get current active positions
-        3. Calculate Kelly position sizes for each symbol
-        4. Select uncorrelated symbols (max 5 positions)
-        5. Execute BUY/SELL orders based on signals and portfolio optimization
+        1. Circuit Breaker 확인 (일일 손실, VIX 극단치)
+        2. Detect market regime
+        3. Get current active positions
+        4. Calculate Kelly position sizes for each symbol
+        5. Select uncorrelated symbols (max 5 positions)
+        6. Execute BUY/SELL orders based on signals and portfolio optimization
         
         Args:
             symbols: List of symbols to analyze
         """
         try:
             logger.info("%d개 심볼로 포트폴리오 처리 중", len(symbols))
+            
+            # 0. Circuit Breaker 확인
+            if self.circuit_breaker:
+                # 포트폴리오 가치 조회
+                try:
+                    account = self.api.get_account()
+                    portfolio_value = float(account.portfolio_value)
+                except Exception:
+                    portfolio_value = None
+                
+                if not self.circuit_breaker.can_trade(portfolio_value):
+                    status = self.circuit_breaker.get_status()
+                    logger.warning(
+                        "Circuit Breaker 활성화 - 트레이딩 중단 (상태: %s, 일일손익: $%.2f)",
+                        status['state'], status['daily_pnl']
+                    )
+                    return
             
             # 1. 시장 레짐 감지
             self.detect_market_regime()

@@ -146,3 +146,57 @@ async def get_system_status():
         },
         "timestamp": "2025-12-29T06:00:00Z"
     }
+
+
+@router.get("/circuit-breaker")
+async def get_circuit_breaker_status():
+    """
+    Circuit Breaker 현재 상태를 조회합니다.
+    
+    응답:
+        - state: closed(정상) / open(차단) / half_open(테스트중)
+        - opened_at: 차단 시작 시간
+        - consecutive_failures: 연속 실패 횟수
+        - daily_pnl: 오늘 손익
+        - avg_latency_ms: 평균 API 레이턴시
+    """
+    from app.services.circuit_breaker import get_circuit_breaker
+    
+    breaker = get_circuit_breaker()
+    return breaker.get_status()
+
+
+@router.post("/circuit-breaker/open")
+async def open_circuit_breaker(reason: str = "수동 차단"):
+    """
+    Circuit Breaker를 수동으로 활성화 (트레이딩 중단).
+    
+    Args:
+        reason: 차단 사유
+    
+    사용 사례:
+        - 시스템 점검 시
+        - 비정상 시장 상황 감지 시
+    """
+    from app.services.circuit_breaker import get_circuit_breaker
+    
+    breaker = get_circuit_breaker()
+    breaker.force_open(reason)
+    return {"status": "opened", "reason": reason}
+
+
+@router.post("/circuit-breaker/close")
+async def close_circuit_breaker():
+    """
+    Circuit Breaker를 수동으로 해제 (트레이딩 재개).
+    
+    주의:
+        - 차단 원인이 해결되었는지 확인 후 사용
+        - 시장 상황이 정상인지 확인 필요
+    """
+    from app.services.circuit_breaker import get_circuit_breaker
+    
+    breaker = get_circuit_breaker()
+    breaker.force_close()
+    return {"status": "closed", "message": "Trading resumed"}
+

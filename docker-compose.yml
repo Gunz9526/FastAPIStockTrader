@@ -35,9 +35,11 @@ services:
       redis:
         condition: service_started
 
-  worker:
+  # HIGH PRIORITY: Real-time trading operations
+  # Dedicated worker for time-sensitive trading tasks
+  worker-trading:
     build: .
-    command: celery -A app.worker worker --loglevel=info
+    command: celery -A app.worker worker -Q trading --loglevel=info --concurrency=1
     volumes:
       - .:/app
     env_file:
@@ -45,6 +47,35 @@ services:
     depends_on:
       - app
       - redis
+    restart: unless-stopped
+
+  # MEDIUM PRIORITY: Data collection and analysis
+  # Handles 15m data, sentiment, VIX collection
+  worker-data:
+    build: .
+    command: celery -A app.worker worker -Q data --loglevel=info --concurrency=2
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    depends_on:
+      - app
+      - redis
+    restart: unless-stopped
+
+  # LOW PRIORITY: Long-running training jobs
+  # Isolated worker for CPU-intensive model training
+  worker-training:
+    build: .
+    command: celery -A app.worker worker -Q training --loglevel=info --concurrency=1
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    depends_on:
+      - app
+      - redis
+    restart: unless-stopped
 
   beat:
     build: .
@@ -54,7 +85,8 @@ services:
     env_file:
       - .env
     depends_on:
-      - worker
+      - worker-trading
+      - worker-data
 
   prometheus:
     image: prom/prometheus
