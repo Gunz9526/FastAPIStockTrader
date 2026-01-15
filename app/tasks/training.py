@@ -179,11 +179,29 @@ def _load_and_prepare_data(
             except Exception as e:
                 logger.debug("VIX 로드 실패: %s", e)
             
-            # SPY 전체 데이터로 현재 시장 regime 감지
+            # 시계열별로 rolling window regime 분류 (FIX: 전체 기간 한 번에 분류하던 문제 해결)
             if len(spy_features) >= 50:
-                current_regime = regime_detector.detect_regime(spy_features, vix_value=vix_value)
-                logger.info("전체 기간 시장 레짐: %s", current_regime.value.upper())
-                X['regime'] = current_regime.value
+                logger.info("시계열별 rolling window regime 분류 시작...")
+                
+                # 각 샘플의 시점까지의 SPY 데이터로 regime 분류
+                regimes = []
+                for idx, timestamp in enumerate(X.index):
+                    # 해당 시점까지의 SPY 데이터 (최근 200개 윈도우)
+                    spy_window = spy_features[spy_features.index <= timestamp].tail(200)
+                    
+                    if len(spy_window) >= 50:
+                        regime = regime_detector.detect_regime(spy_window, vix_value=vix_value)
+                        regimes.append(regime.value)
+                    else:
+                        # 초기 데이터 부족 시 기본값
+                        regimes.append(MarketRegime.SIDEWAYS_CALM.value)
+                    
+                    # 진행 상황 로깅 (10% 단위)
+                    if (idx + 1) % (len(X) // 10) == 0:
+                        logger.info("Regime 분류 진행: %d/%d (%.1f%%)", idx + 1, len(X), (idx + 1) / len(X) * 100)
+                
+                X['regime'] = regimes
+                logger.info("시계열별 regime 분류 완료: %d개 샘플", len(regimes))
             else:
                 logger.warning("SPY features 부족 (%d개), SIDEWAYS_CALM으로 설정", len(spy_features))
                 X['regime'] = MarketRegime.SIDEWAYS_CALM.value
@@ -305,8 +323,67 @@ def train_models(self):
         has_regime = 'regime' in X.columns
         
         if has_regime:
-            logger.info("단계 H.3: 레짐별 모델 학습 수행")
+            logger.info("레짐별 모델 학습")
             _train_regime_specific_models(feature_engineer, X, y)
+            
+            # FIX: predictor를 사용하여 학습된 모델 검증
+            logger.info("\n" + "="*60)
+            logger.info("학습된 모델 검증 (PredictorService 사용)")
+            logger.info("="*60)
+            
+            try:
+                # PredictorService로 각 regime 모델 로드 및 평가
+                for regime in MarketRegime:
+                    regime_value = regime.value
+                    regime_mask = X['regime'] == regime_value
+                    X_regime = X[regime_mask].drop(columns=['regime'])
+                    y_regime = y[regime_mask]
+                    
+                    if len(X_regime) < 100:
+                        logger.info(f"{regime_value}: 데이터 부족 (샘플 {len(X_regime)}개), 검증 스킵")
+                        continue
+                    
+                    # predictor로 모델 로드
+                    try:
+                        ensemble = predictor.load_model(regime)
+                        if ensemble is None:
+                            logger.warning(f"{regime_value}: 모델 파일 없음, 검증 스킵")
+                            continue
+                        
+                        # 검증 데이터로 평가 (최근 20% 사용)
+                        split_idx = int(len(X_regime) * 0.8)
+                        X_val = X_regime.iloc[split_idx:]
+                        y_val = y_regime.iloc[split_idx:]
+                        
+                        # Feature scaling
+                        market_avg_volume = X_regime['volume'].mean() if 'volume' in X_regime.columns else None
+                        X_val_scaled = feature_engineer.extract_feature_vector(
+                            X_val, fit_scaler=False, market_avg_volume=market_avg_volume
+                        )
+                        
+                        # 예측 및 정확도 계산
+                        predictions = ensemble.predict(X_val_scaled)
+                        pred_dir = (predictions > 0).astype(int) * 2 - 1
+                        actual_dir = (y_val.values > 0).astype(int) * 2 - 1
+                        accuracy = (pred_dir == actual_dir).mean()
+                        
+                        # Sharpe ratio 계산
+                        returns = y_val.values * pred_dir
+                        sharpe = returns.mean() / (returns.std() + 1e-8) * ((252 * 26) ** 0.5)
+                        
+                        logger.info(f"{regime_value} 모델 검증 완료:")
+                        logger.info(f"  - 샘플: {len(X_regime)} (검증: {len(X_val)})")
+                        logger.info(f"  - 방향 정확도: {accuracy:.2%}")
+                        logger.info(f"  - Sharpe Ratio: {sharpe:.4f}")
+                        
+                    except Exception as e:
+                        logger.error(f"{regime_value} 모델 검증 실패: {e}", exc_info=True)
+                
+                logger.info("="*60 + "\n")
+                
+            except Exception as e:
+                logger.error(f"모델 검증 중 오류: {e}", exc_info=True)
+            
             session.commit()
             logger.info("학습 완료 - 레짐별 모델이 저장되었습니다")
         else:
