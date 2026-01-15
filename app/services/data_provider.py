@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any
 import logging
 from alpaca.data.historical import StockHistoricalDataClient
@@ -91,13 +91,27 @@ class AlpacaDataProvider(AbstractDataProvider):
         end_date: datetime,
         timeframe: Optional[TimeFrame] = None
     ) -> List[StockOHLCVCreate]:
-        """Fetch historical data with caching."""
+        """
+        Fetch historical data with caching and pagination.
+        
+        페이지네이션 구현:
+        - 15분봉 && 180일 이상: 6개월 단위로 분할 요청
+        - Alpaca API limit=10,000 제한 회피
+        """
         try:
             if timeframe is None:
                 timeframe = TimeFrame.Day
 
             # Calculate days for cache key
             days = (end_date - start_date).days
+            
+            # === 페이지네이션 적용 조건 ===
+            # 15분봉 && 180일 이상인 경우
+            is_intraday = timeframe.unit == TimeFrameUnit.Minute if hasattr(timeframe, 'unit') else False
+            
+            if is_intraday and days > 180:
+                logger.info(f"{symbol} 페이지네이션 적용: {days}일을 6개월 단위로 분할")
+                return await self._get_historical_data_paginated(symbol, start_date, end_date, timeframe)
             
             # Try cache first (Only for Daily for now)
             cached = None
@@ -160,6 +174,99 @@ class AlpacaDataProvider(AbstractDataProvider):
         except Exception as e:
             logger.error(f"{symbol} 이력 조회 실패: {e}", exc_info=True)
             return []
+    
+    async def _get_historical_data_paginated(
+        self,
+        symbol: str,
+        start_date: datetime,
+        end_date: datetime,
+        timeframe: TimeFrame
+    ) -> List[StockOHLCVCreate]:
+        """
+        긴 기간 데이터를 페이지네이션으로 가져오기
+        
+        Args:
+            symbol: 종목 심볼
+            start_date: 시작 날짜
+            end_date: 종료 날짜
+            timeframe: 시간 단위
+        
+        Returns:
+            전체 StockOHLCVCreate 리스트 (모든 페이지 합산)
+        """
+        period_days = 182  # 약 6개월
+        periods = []
+        current_start = start_date
+        
+        while current_start < end_date:
+            current_end = min(current_start + timedelta(days=period_days), end_date)
+            periods.append((current_start, current_end))
+            current_start = current_end
+        
+        logger.info(f"{symbol}: {len(periods)}개 기간으로 분할하여 요청")
+        
+        all_data = []
+        loop = asyncio.get_event_loop()
+        
+        for period_idx, (period_start, period_end) in enumerate(periods, 1):
+            logger.debug(f"{symbol} [{period_idx}/{len(periods)}]: {period_start.date()} ~ {period_end.date()}")
+            
+            def _fetch_period():
+                request = StockBarsRequest(
+                    symbol_or_symbols=[symbol],
+                    timeframe=timeframe,
+                    start=period_start,
+                    end=period_end,
+                    limit=10000,
+                    feed='iex'
+                )
+                bars_response = self.data_client.get_stock_bars(request)
+                
+                if not bars_response or not bars_response.data:
+                    return []
+                
+                symbol_bars = bars_response.data.get(symbol, [])
+                if not symbol_bars:
+                    return []
+                
+                result = []
+                for bar in symbol_bars:
+                    result.append(StockOHLCVCreate(
+                        symbol=symbol,
+                        date_time=bar.timestamp,
+                        open=float(bar.open),
+                        high=float(bar.high),
+                        low=float(bar.low),
+                        close=float(bar.close),
+                        volume=float(bar.volume),
+                        adj_close=None,
+                        vwap=float(bar.vwap) if hasattr(bar, 'vwap') and bar.vwap is not None else None,
+                        trade_count=int(bar.trade_count) if hasattr(bar, 'trade_count') and bar.trade_count is not None else None
+                    ))
+                return result
+            
+            try:
+                period_data = await loop.run_in_executor(None, _fetch_period)
+                if period_data:
+                    all_data.extend(period_data)
+                    logger.debug(f"{symbol} [{period_idx}/{len(periods)}]: {len(period_data)}개 bar 수신")
+                else:
+                    logger.warning(f"{symbol} [{period_idx}/{len(periods)}]: 반환된 bar 없음")
+                
+                # Rate limiting (각 페이지 요청 후)
+                await asyncio.sleep(0.3)
+                
+            except Exception as e:
+                logger.error(
+                    f"{symbol} [{period_idx}/{len(periods)}] 요청 실패 "
+                    f"({period_start.date()} ~ {period_end.date()}): {e}",
+                    exc_info=True
+                )
+                # 다음 기간 계속 시도
+                continue
+        
+        logger.info(f"{symbol}: 총 {len(all_data)}개 bar 수신 완료")
+        return all_data
 
     async def place_order(self, symbol: str, quantity: int, side: str) -> Optional[str]:
         """Place order and invalidate cache."""
