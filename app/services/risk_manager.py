@@ -386,8 +386,8 @@ class RiskManager:
         1. Minimum Holding Period: 60 minutes (4 bars)
         2. Minimum Profit Threshold: 1.5% (unless hold > 120 min)
         
-        Exceptions:
-        - Stop-loss signals should override these rules (handled by caller)
+        CRITICAL: 손절 시(-3% 이하)에는 방어 규칙 무시해야 함!
+        이 함수는 일반적인 방어 규칙만 체크. 손절 로직은 caller에서 처리.
         
         Args:
             symbol: Stock symbol
@@ -400,6 +400,12 @@ class RiskManager:
         """
         now = datetime.now()
         
+        # 손익 계산
+        profit_pct = (current_price - entry_price) / entry_price
+        
+        # 손절 시나리오는 항상 허용해야 함 (caller에서 처리)
+        # 여기서는 일반 규칙만 체크
+        
         # Rule 1: Minimum holding period (60 minutes)
         hold_duration = now - entry_time
         min_hold_time = timedelta(minutes=self.min_hold_bars * self.bars_per_cycle)
@@ -407,18 +413,23 @@ class RiskManager:
         if hold_duration < min_hold_time:
             held_min = int(hold_duration.total_seconds() / 60)
             required_min = int(min_hold_time.total_seconds() / 60)
+            # 손절 예외: -3% 이하면 즉시 허용
+            if profit_pct <= -0.03:
+                return True, f"STOP_LOSS_OVERRIDE: {profit_pct:.2%} (hold: {held_min}min)"
             return False, f"MIN_HOLD: {held_min}min < {required_min}min (entry: {entry_time.strftime('%H:%M')})"
         
         # Rule 2: Minimum profit threshold (1.5%)
-        profit_pct = (current_price - entry_price) / entry_price
-        
         if profit_pct < self.min_profit_pct:
+            # 손절 예외: -3% 이하면 즉시 허용
+            if profit_pct <= -0.03:
+                return True, f"STOP_LOSS: {profit_pct:.2%}"
+            
             # Allow exit after 8 bars (120 minutes) even if unprofitable
             max_hold_time = timedelta(minutes=8 * self.bars_per_cycle)
             if hold_duration < max_hold_time:
                 return False, f"MIN_PROFIT: {profit_pct:.2%} < 1.5% (hold {int(hold_duration.total_seconds()/60)}min)"
         
-        return True, "OK"
+        return True, f"OK (profit: {profit_pct:.2%}, hold: {int(hold_duration.total_seconds()/60)}min)"
     
     def record_position_entry(self, symbol: str, entry_time: datetime):
         """

@@ -440,10 +440,16 @@ def _train_regime_specific_models(
         logger.info(f"Regime data: {len(X_regime)} samples ({len(X_regime)/len(X)*100:.1f}% of total)")
         
         # Minimum data requirement
-        if len(X_regime) < 1000:
-            logger.warning(f"Insufficient {regime_value} data: {len(X_regime)} < 1000 samples")
+        # sideways_volatile 같은 희귀 regime도 학습 가능하도록 최소 샘플 100으로 완화 (고민중)
+        min_samples = 1000
+        if len(X_regime) < min_samples:
+            logger.warning(f"Insufficient {regime_value} data: {len(X_regime)} < {min_samples} samples")
             logger.warning(f"Skipping {regime_value} model training (will use generic fallback)")
             continue
+        
+        # # 데이터 양에 따른 경고 (1000개 미만)
+        # if len(X_regime) < 1000:
+        #     logger.warning(f"{regime_value}: 샘플 수 부족 ({len(X_regime)}개). 과적합 위험 있음. 더 많은 데이터 수집 권장.")
         
         # Calculate market average volume for this regime
         market_avg_volume = X_regime['volume'].mean() if 'volume' in X_regime.columns else None
@@ -512,9 +518,15 @@ def _train_regime_specific_models(
 def tune_models(self):
     """
     Hyperparameter tuning task using Optuna.
-    Uses shared data loading for consistency.
+    Performs regime-specific tuning for better performance in each market condition.
+    
+    Strategy:
+    1. Load data and classify by regime
+    2. Tune for each regime separately (4 tuning runs)
+    3. Save regime-specific best params to best_params_{regime}.json
+    4. Also save combined best_params.json for backward compatibility
     """
-    logger.info("Starting hyperparameter tuning with Optuna...")
+    logger.info("Starting regime-specific hyperparameter tuning with Optuna...")
     
     session = SessionLocal()
     try:
@@ -529,9 +541,11 @@ def tune_models(self):
         end_date = pd.Timestamp.now(tz='UTC')
         start_date = end_date - timedelta(days=LOOKBACK_YEARS * 365)
         
-        # Load data using shared function
+        # Load data with regime classification
         X, y, successful_symbols = _load_and_prepare_data(
-            repo, feature_engineer, symbols, start_date, end_date, symbol_limit=None  # 모든 활성 심볼 사용
+            repo, feature_engineer, symbols, start_date, end_date, 
+            symbol_limit=None,  # Use all active symbols
+            classify_regime=True  # Enable regime classification
         )
         
         if X.empty:
@@ -540,169 +554,96 @@ def tune_models(self):
         
         logger.info(f"Tuning data: {len(X)} samples from {len(successful_symbols)} symbols")
         
-        # Calculate market average volume
-        market_avg_volume = X['volume'].mean() if 'volume' in X.columns else None
+        # Check if regime column exists
+        has_regime = 'regime' in X.columns
+        if not has_regime:
+            logger.warning("No regime classification found. Falling back to global tuning.")
+            # Fallback to old behavior (tune on all data)
+            return _tune_models_global(X, y, feature_engineer)
         
-        # Scale features
-        X_scaled = feature_engineer.extract_feature_vector(X, fit_scaler=True, market_avg_volume=market_avg_volume)
+        # Regime-specific tuning
+        logger.info("\n" + "="*60)
+        logger.info("REGIME-SPECIFIC HYPERPARAMETER TUNING")
+        logger.info("="*60)
         
-        # CatBoost tuning
-        logger.info("=" * 60)
-        logger.info("Starting CatBoost Hyperparameter Tuning (100 trials, 3 parallel)")
-        logger.info("=" * 60)
-        def catboost_objective(trial):
-            logger.info(f"[CatBoost Trial {trial.number + 1}/100] Testing parameters...")
-            params = {
-                'iterations': trial.suggest_int('iterations', 100, 500),
-                'depth': trial.suggest_int('depth', 4, 10),
-                'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3),
-                'l2_leaf_reg': trial.suggest_float('l2_leaf_reg', 1, 10),
-                'verbose': False,
-                'allow_writing_files': False
+        regime_dist = X['regime'].value_counts().to_dict()
+        logger.info("Regime distribution: %s", regime_dist)
+        
+        all_regime_params = {}
+        
+        for regime in MarketRegime:
+            regime_value = regime.value
+            logger.info(f"\n{'='*60}")
+            logger.info(f"Tuning for {regime_value.upper()} regime")
+            logger.info(f"{'='*60}")
+            
+            # Filter data for this regime
+            regime_mask = X['regime'] == regime_value
+            X_regime = X[regime_mask].drop(columns=['regime'])
+            y_regime = y[regime_mask]
+            
+            logger.info(f"Regime data: {len(X_regime)} samples ({len(X_regime)/len(X)*100:.1f}% of total)")
+            
+            # Skip if insufficient data (use 500 as minimum for tuning)
+            if len(X_regime) < 500:
+                logger.warning(f"Insufficient {regime_value} data for tuning: {len(X_regime)} < 500")
+                logger.warning(f"Skipping {regime_value} tuning (will use generic params)")
+                all_regime_params[regime_value] = None
+                continue
+            
+            # Scale features
+            market_avg_volume = X_regime['volume'].mean() if 'volume' in X_regime.columns else None
+            X_regime_scaled = feature_engineer.extract_feature_vector(
+                X_regime, fit_scaler=True, market_avg_volume=market_avg_volume
+            )
+            
+            # Tune for this regime
+            regime_params = _tune_regime_models(
+                X_regime_scaled, y_regime, regime_value
+            )
+            all_regime_params[regime_value] = regime_params
+            
+            # Save regime-specific params
+            regime_config_path = f"{MODEL_SAVE_PATH}/best_params_{regime_value}.json"
+            os.makedirs(MODEL_SAVE_PATH, mode=0o777, exist_ok=True)
+            with open(regime_config_path, 'w') as f:
+                json.dump({
+                    'regime': regime_value,
+                    'samples': len(X_regime),
+                    'tuned_at': datetime.now().isoformat(),
+                    **regime_params
+                }, f, indent=2)
+            
+            logger.info(f"{regime_value.upper()} params saved: {regime_config_path}")
+        
+        # Save combined config for backward compatibility
+        # Use most common regime (sideways_calm) as default
+        default_params = all_regime_params.get(MarketRegime.SIDEWAYS_CALM.value)
+        if default_params is None:
+            # If sideways_calm tuning failed, use first available
+            for params in all_regime_params.values():
+                if params is not None:
+                    default_params = params
+                    break
+        
+        if default_params:
+            combined_config = {
+                'default': default_params,
+                'regime_specific': all_regime_params,
+                'tuned_at': datetime.now().isoformat()
             }
             
-            model = CatBoostWrapper(**params)
-            tscv = TimeSeriesSplit(n_splits=3)
-            scores = []
+            with open(f"{MODEL_SAVE_PATH}/best_params.json", 'w') as f:
+                json.dump(combined_config, f, indent=2)
             
-            for train_idx, val_idx in tscv.split(X_scaled):
-                X_tr, X_val = X_scaled.iloc[train_idx], X_scaled.iloc[val_idx]
-                y_tr, y_val = y.iloc[train_idx], y.iloc[val_idx]
-                
-                model.train(X_tr, y_tr)
-                pred = model.predict(X_val)
-                
-                pred_dir = (pred > 0).astype(int) * 2 - 1
-                returns = y_val.values * pred_dir
-                sharpe = returns.mean() / (returns.std() + 1e-8) * ((252 * 26) ** 0.5)
-                scores.append(sharpe)
-            
-            avg_sharpe = sum(scores) / len(scores)
-            logger.info(f"[CatBoost Trial {trial.number + 1}/100] Avg Sharpe: {avg_sharpe:.4f}")
-            return avg_sharpe
-        
-        study_cat = optuna.create_study(
-            direction='maximize',
-            pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=10)
-        )
-        study_cat.optimize(catboost_objective, n_trials=100, n_jobs=3, timeout=3600, show_progress_bar=False)
-        best_catboost = study_cat.best_params
-        logger.info("=" * 60)
-        logger.info(f"CatBoost Best Params: {best_catboost}")
-        logger.info(f"CatBoost Best Sharpe: {study_cat.best_value:.4f}")
-        logger.info("=" * 60)
-        
-        # LGBM tuning
-        logger.info("=" * 60)
-        logger.info("Starting LightGBM Hyperparameter Tuning (100 trials, 3 parallel)")
-        logger.info("=" * 60)
-        def lgbm_objective(trial):
-            logger.info(f"[LGBM Trial {trial.number + 1}/100] Testing parameters...")
-            params = {
-                'n_estimators': trial.suggest_int('n_estimators', 100, 500),
-                'max_depth': trial.suggest_int('max_depth', 3, 8),
-                'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.15),
-                'num_leaves': trial.suggest_int('num_leaves', 15, 60),
-                'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 5, 50),
-                'min_gain_to_split': trial.suggest_float('min_gain_to_split', 0.0, 0.1),
-                'reg_alpha': trial.suggest_float('reg_alpha', 0.1, 10),
-                'reg_lambda': trial.suggest_float('reg_lambda', 0.1, 10),
-                'verbose': -1
-            }
-            
-            model = LGBMWrapper(**params)
-            tscv = TimeSeriesSplit(n_splits=3)
-            scores = []
-            
-            for train_idx, val_idx in tscv.split(X_scaled):
-                X_tr, X_val = X_scaled.iloc[train_idx], X_scaled.iloc[val_idx]
-                y_tr, y_val = y.iloc[train_idx], y.iloc[val_idx]
-                
-                model.train(X_tr, y_tr)
-                pred = model.predict(X_val)
-                
-                pred_dir = (pred > 0).astype(int) * 2 - 1
-                returns = y_val.values * pred_dir
-                sharpe = returns.mean() / (returns.std() + 1e-8) * ((252 * 26) ** 0.5)
-                scores.append(sharpe)
-            
-            avg_sharpe = sum(scores) / len(scores)
-            logger.info(f"[LGBM Trial {trial.number + 1}/100] Avg Sharpe: {avg_sharpe:.4f}")
-            return avg_sharpe
-        
-        study_lgbm = optuna.create_study(
-            direction='maximize',
-            pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=10)
-        )
-        study_lgbm.optimize(lgbm_objective, n_trials=100, n_jobs=3, timeout=3600, show_progress_bar=False)
-        best_lgbm = study_lgbm.best_params
-        logger.info("=" * 60)
-        logger.info(f"LGBM Best Params: {best_lgbm}")
-        logger.info(f"LGBM Best Sharpe: {study_lgbm.best_value:.4f}")
-        logger.info("=" * 60)
-        
-        # XGBoost tuning
-        logger.info("=" * 60)
-        logger.info("Starting XGBoost Hyperparameter Tuning (100 trials, 3 parallel)")
-        logger.info("=" * 60)
-        def xgb_objective(trial):
-            logger.info(f"[XGBoost Trial {trial.number + 1}/100] Testing parameters...")
-            params = {
-                'n_estimators': trial.suggest_int('n_estimators', 100, 500),
-                'max_depth': trial.suggest_int('max_depth', 3, 10),
-                'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3),
-                'subsample': trial.suggest_float('subsample', 0.6, 1.0),
-                'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
-                'reg_alpha': trial.suggest_float('reg_alpha', 0.1, 10),
-                'reg_lambda': trial.suggest_float('reg_lambda', 0.1, 10),
-                'verbosity': 0
-            }
-            
-            model = XGBoostWrapper(**params)
-            tscv = TimeSeriesSplit(n_splits=3)
-            scores = []
-            
-            for train_idx, val_idx in tscv.split(X_scaled):
-                X_tr, X_val = X_scaled.iloc[train_idx], X_scaled.iloc[val_idx]
-                y_tr, y_val = y.iloc[train_idx], y.iloc[val_idx]
-                
-                model.train(X_tr, y_tr)
-                pred = model.predict(X_val)
-                
-                pred_dir = (pred > 0).astype(int) * 2 - 1
-                returns = y_val.values * pred_dir
-                sharpe = returns.mean() / (returns.std() + 1e-8) * ((252 * 26) ** 0.5)
-                scores.append(sharpe)
-            
-            avg_sharpe = sum(scores) / len(scores)
-            logger.info(f"[XGBoost Trial {trial.number + 1}/100] Avg Sharpe: {avg_sharpe:.4f}")
-            return avg_sharpe
-        
-        study_xgb = optuna.create_study(
-            direction='maximize',
-            pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=10)
-        )
-        study_xgb.optimize(xgb_objective, n_trials=100, n_jobs=3, timeout=3600, show_progress_bar=False)
-        best_xgb = study_xgb.best_params
-        logger.info("=" * 60)
-        logger.info(f"XGBoost Best Params: {best_xgb}")
-        logger.info(f"XGBoost Best Sharpe: {study_xgb.best_value:.4f}")
-        logger.info("=" * 60)
-        
-        # Save all tuned configs (without ratio tuning - use Sharpe only for simplicity)
-        tuning_config = {
-            'catboost': best_catboost,
-            'lgbm': best_lgbm,
-            'xgboost': best_xgb,
-            'tuned_at': datetime.now().isoformat()
-        }
-        
-        os.makedirs(MODEL_SAVE_PATH, mode=0o777, exist_ok=True)
-        with open(f"{MODEL_SAVE_PATH}/best_params.json", 'w') as f:
-            json.dump(tuning_config, f, indent=2)
+            logger.info("\n" + "="*60)
+            logger.info("Regime-specific tuning complete")
+            logger.info(f"Results saved to {MODEL_SAVE_PATH}/")
+            logger.info("="*60)
+        else:
+            logger.error("All regime tuning failed. No params saved.")
         
         session.commit()
-        logger.info("Hyperparameter tuning complete - results saved to best_params.json")
         
     except Exception as e:
         logger.error(f"Tuning error: {e}", exc_info=True)
@@ -710,6 +651,340 @@ def tune_models(self):
         raise
     finally:
         session.close()
+
+
+def _tune_regime_models(
+    X_scaled: pd.DataFrame,
+    y: pd.Series,
+    regime_name: str
+) -> Dict:
+    """
+    Tune hyperparameters for a specific regime.
+    
+    Args:
+        X_scaled: Scaled features
+        y: Target values
+        regime_name: Name of the regime (for logging)
+    
+    Returns:
+        Dict with best params for catboost, lgbm, xgboost
+    """
+    # Reduce trials for regime-specific tuning (50 instead of 100)
+    n_trials = 50
+    n_jobs = 3
+    timeout = 1800  # 30 minutes per model
+    
+    # CatBoost tuning
+    logger.info("=" * 60)
+    logger.info(f"[{regime_name.upper()}] CatBoost Tuning ({n_trials} trials)")
+    logger.info("=" * 60)
+    
+    def catboost_objective(trial):
+        params = {
+            'iterations': trial.suggest_int('iterations', 100, 500),
+            'depth': trial.suggest_int('depth', 4, 10),
+            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3),
+            'l2_leaf_reg': trial.suggest_float('l2_leaf_reg', 1, 10),
+            'verbose': False,
+            'allow_writing_files': False
+        }
+        
+        model = CatBoostWrapper(**params)
+        tscv = TimeSeriesSplit(n_splits=3)
+        scores = []
+        
+        for train_idx, val_idx in tscv.split(X_scaled):
+            X_tr, X_val = X_scaled.iloc[train_idx], X_scaled.iloc[val_idx]
+            y_tr, y_val = y.iloc[train_idx], y.iloc[val_idx]
+            
+            model.train(X_tr, y_tr)
+            pred = model.predict(X_val)
+            
+            pred_dir = (pred > 0).astype(int) * 2 - 1
+            returns = y_val.values * pred_dir
+            sharpe = returns.mean() / (returns.std() + 1e-8) * ((252 * 26) ** 0.5)
+            scores.append(sharpe)
+        
+        return sum(scores) / len(scores)
+    
+    study_cat = optuna.create_study(
+        direction='maximize',
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=10)
+    )
+    study_cat.optimize(catboost_objective, n_trials=n_trials, n_jobs=n_jobs, 
+                       timeout=timeout, show_progress_bar=False)
+    best_catboost = study_cat.best_params
+    logger.info(f"[{regime_name.upper()}] CatBoost Best Sharpe: {study_cat.best_value:.4f}")
+    
+    # LGBM tuning
+    logger.info("=" * 60)
+    logger.info(f"[{regime_name.upper()}] LightGBM Tuning ({n_trials} trials)")
+    logger.info("=" * 60)
+    
+    def lgbm_objective(trial):
+        params = {
+            'n_estimators': trial.suggest_int('n_estimators', 100, 500),
+            'max_depth': trial.suggest_int('max_depth', 3, 8),
+            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.15),
+            'num_leaves': trial.suggest_int('num_leaves', 15, 60),
+            'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 5, 50),
+            'min_gain_to_split': trial.suggest_float('min_gain_to_split', 0.0, 0.1),
+            'reg_alpha': trial.suggest_float('reg_alpha', 0.1, 10),
+            'reg_lambda': trial.suggest_float('reg_lambda', 0.1, 10),
+            'verbose': -1
+        }
+        
+        model = LGBMWrapper(**params)
+        tscv = TimeSeriesSplit(n_splits=3)
+        scores = []
+        
+        for train_idx, val_idx in tscv.split(X_scaled):
+            X_tr, X_val = X_scaled.iloc[train_idx], X_scaled.iloc[val_idx]
+            y_tr, y_val = y.iloc[train_idx], y.iloc[val_idx]
+            
+            model.train(X_tr, y_tr)
+            pred = model.predict(X_val)
+            
+            pred_dir = (pred > 0).astype(int) * 2 - 1
+            returns = y_val.values * pred_dir
+            sharpe = returns.mean() / (returns.std() + 1e-8) * ((252 * 26) ** 0.5)
+            scores.append(sharpe)
+        
+        return sum(scores) / len(scores)
+    
+    study_lgbm = optuna.create_study(
+        direction='maximize',
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=10)
+    )
+    study_lgbm.optimize(lgbm_objective, n_trials=n_trials, n_jobs=n_jobs,
+                        timeout=timeout, show_progress_bar=False)
+    best_lgbm = study_lgbm.best_params
+    logger.info(f"[{regime_name.upper()}] LGBM Best Sharpe: {study_lgbm.best_value:.4f}")
+    
+    # XGBoost tuning
+    logger.info("=" * 60)
+    logger.info(f"[{regime_name.upper()}] XGBoost Tuning ({n_trials} trials)")
+    logger.info("=" * 60)
+    
+    def xgb_objective(trial):
+        params = {
+            'n_estimators': trial.suggest_int('n_estimators', 100, 500),
+            'max_depth': trial.suggest_int('max_depth', 3, 10),
+            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3),
+            'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
+            'reg_alpha': trial.suggest_float('reg_alpha', 0.1, 10),
+            'reg_lambda': trial.suggest_float('reg_lambda', 0.1, 10),
+            'verbosity': 0
+        }
+        
+        model = XGBoostWrapper(**params)
+        tscv = TimeSeriesSplit(n_splits=3)
+        scores = []
+        
+        for train_idx, val_idx in tscv.split(X_scaled):
+            X_tr, X_val = X_scaled.iloc[train_idx], X_scaled.iloc[val_idx]
+            y_tr, y_val = y.iloc[train_idx], y.iloc[val_idx]
+            
+            model.train(X_tr, y_tr)
+            pred = model.predict(X_val)
+            
+            pred_dir = (pred > 0).astype(int) * 2 - 1
+            returns = y_val.values * pred_dir
+            sharpe = returns.mean() / (returns.std() + 1e-8) * ((252 * 26) ** 0.5)
+            scores.append(sharpe)
+        
+        return sum(scores) / len(scores)
+    
+    study_xgb = optuna.create_study(
+        direction='maximize',
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=10)
+    )
+    study_xgb.optimize(xgb_objective, n_trials=n_trials, n_jobs=n_jobs,
+                       timeout=timeout, show_progress_bar=False)
+    best_xgb = study_xgb.best_params
+    logger.info(f"[{regime_name.upper()}] XGBoost Best Sharpe: {study_xgb.best_value:.4f}")
+    
+    return {
+        'catboost': best_catboost,
+        'lgbm': best_lgbm,
+        'xgboost': best_xgb
+    }
+
+
+def _tune_models_global(
+    X: pd.DataFrame,
+    y: pd.Series,
+    feature_engineer: FeatureEngineer
+) -> None:
+    """
+    Fallback: Tune on all data globally (old behavior).
+    Used when regime classification is not available.
+    """
+    logger.warning("Performing global tuning (no regime classification)")
+    
+    # Calculate market average volume
+    market_avg_volume = X['volume'].mean() if 'volume' in X.columns else None
+    
+    # Scale features
+    X_scaled = feature_engineer.extract_feature_vector(X, fit_scaler=True, market_avg_volume=market_avg_volume)
+    
+    # CatBoost tuning
+    logger.info("=" * 60)
+    logger.info("Starting CatBoost Hyperparameter Tuning (100 trials, 3 parallel)")
+    logger.info("=" * 60)
+    def catboost_objective(trial):
+        logger.info(f"[CatBoost Trial {trial.number + 1}/100] Testing parameters...")
+        params = {
+            'iterations': trial.suggest_int('iterations', 100, 500),
+            'depth': trial.suggest_int('depth', 4, 10),
+            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3),
+            'l2_leaf_reg': trial.suggest_float('l2_leaf_reg', 1, 10),
+            'verbose': False,
+            'allow_writing_files': False
+        }
+        
+        model = CatBoostWrapper(**params)
+        tscv = TimeSeriesSplit(n_splits=3)
+        scores = []
+        
+        for train_idx, val_idx in tscv.split(X_scaled):
+            X_tr, X_val = X_scaled.iloc[train_idx], X_scaled.iloc[val_idx]
+            y_tr, y_val = y.iloc[train_idx], y.iloc[val_idx]
+            
+            model.train(X_tr, y_tr)
+            pred = model.predict(X_val)
+            
+            pred_dir = (pred > 0).astype(int) * 2 - 1
+            returns = y_val.values * pred_dir
+            sharpe = returns.mean() / (returns.std() + 1e-8) * ((252 * 26) ** 0.5)
+            scores.append(sharpe)
+        
+        avg_sharpe = sum(scores) / len(scores)
+        logger.info(f"[CatBoost Trial {trial.number + 1}/100] Avg Sharpe: {avg_sharpe:.4f}")
+        return avg_sharpe
+    
+    study_cat = optuna.create_study(
+        direction='maximize',
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=10)
+    )
+    study_cat.optimize(catboost_objective, n_trials=100, n_jobs=3, timeout=3600, show_progress_bar=False)
+    best_catboost = study_cat.best_params
+    logger.info("=" * 60)
+    logger.info(f"CatBoost Best Params: {best_catboost}")
+    logger.info(f"CatBoost Best Sharpe: {study_cat.best_value:.4f}")
+    logger.info("=" * 60)
+    
+    # LGBM tuning
+    logger.info("=" * 60)
+    logger.info("Starting LightGBM Hyperparameter Tuning (100 trials, 3 parallel)")
+    logger.info("=" * 60)
+    def lgbm_objective(trial):
+        logger.info(f"[LGBM Trial {trial.number + 1}/100] Testing parameters...")
+        params = {
+            'n_estimators': trial.suggest_int('n_estimators', 100, 500),
+            'max_depth': trial.suggest_int('max_depth', 3, 8),
+            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.15),
+            'num_leaves': trial.suggest_int('num_leaves', 15, 60),
+            'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 5, 50),
+            'min_gain_to_split': trial.suggest_float('min_gain_to_split', 0.0, 0.1),
+            'reg_alpha': trial.suggest_float('reg_alpha', 0.1, 10),
+            'reg_lambda': trial.suggest_float('reg_lambda', 0.1, 10),
+            'verbose': -1
+        }
+        
+        model = LGBMWrapper(**params)
+        tscv = TimeSeriesSplit(n_splits=3)
+        scores = []
+        
+        for train_idx, val_idx in tscv.split(X_scaled):
+            X_tr, X_val = X_scaled.iloc[train_idx], X_scaled.iloc[val_idx]
+            y_tr, y_val = y.iloc[train_idx], y.iloc[val_idx]
+            
+            model.train(X_tr, y_tr)
+            pred = model.predict(X_val)
+            
+            pred_dir = (pred > 0).astype(int) * 2 - 1
+            returns = y_val.values * pred_dir
+            sharpe = returns.mean() / (returns.std() + 1e-8) * ((252 * 26) ** 0.5)
+            scores.append(sharpe)
+        
+        avg_sharpe = sum(scores) / len(scores)
+        logger.info(f"[LGBM Trial {trial.number + 1}/100] Avg Sharpe: {avg_sharpe:.4f}")
+        return avg_sharpe
+    
+    study_lgbm = optuna.create_study(
+        direction='maximize',
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=10)
+    )
+    study_lgbm.optimize(lgbm_objective, n_trials=100, n_jobs=3, timeout=3600, show_progress_bar=False)
+    best_lgbm = study_lgbm.best_params
+    logger.info("=" * 60)
+    logger.info(f"LGBM Best Params: {best_lgbm}")
+    logger.info(f"LGBM Best Sharpe: {study_lgbm.best_value:.4f}")
+    logger.info("=" * 60)
+    
+    # XGBoost tuning
+    logger.info("=" * 60)
+    logger.info("Starting XGBoost Hyperparameter Tuning (100 trials, 3 parallel)")
+    logger.info("=" * 60)
+    def xgb_objective(trial):
+        logger.info(f"[XGBoost Trial {trial.number + 1}/100] Testing parameters...")
+        params = {
+            'n_estimators': trial.suggest_int('n_estimators', 100, 500),
+            'max_depth': trial.suggest_int('max_depth', 3, 10),
+            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3),
+            'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
+            'reg_alpha': trial.suggest_float('reg_alpha', 0.1, 10),
+            'reg_lambda': trial.suggest_float('reg_lambda', 0.1, 10),
+            'verbosity': 0
+        }
+        
+        model = XGBoostWrapper(**params)
+        tscv = TimeSeriesSplit(n_splits=3)
+        scores = []
+        
+        for train_idx, val_idx in tscv.split(X_scaled):
+            X_tr, X_val = X_scaled.iloc[train_idx], X_scaled.iloc[val_idx]
+            y_tr, y_val = y.iloc[train_idx], y.iloc[val_idx]
+            
+            model.train(X_tr, y_tr)
+            pred = model.predict(X_val)
+            
+            pred_dir = (pred > 0).astype(int) * 2 - 1
+            returns = y_val.values * pred_dir
+            sharpe = returns.mean() / (returns.std() + 1e-8) * ((252 * 26) ** 0.5)
+            scores.append(sharpe)
+        
+        avg_sharpe = sum(scores) / len(scores)
+        logger.info(f"[XGBoost Trial {trial.number + 1}/100] Avg Sharpe: {avg_sharpe:.4f}")
+        return avg_sharpe
+    
+    study_xgb = optuna.create_study(
+        direction='maximize',
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=10)
+    )
+    study_xgb.optimize(xgb_objective, n_trials=100, n_jobs=3, timeout=3600, show_progress_bar=False)
+    best_xgb = study_xgb.best_params
+    logger.info("=" * 60)
+    logger.info(f"XGBoost Best Params: {best_xgb}")
+    logger.info(f"XGBoost Best Sharpe: {study_xgb.best_value:.4f}")
+    logger.info("=" * 60)
+    
+    # Save all tuned configs (without ratio tuning - use Sharpe only for simplicity)
+    tuning_config = {
+        'catboost': best_catboost,
+        'lgbm': best_lgbm,
+        'xgboost': best_xgb,
+        'tuned_at': datetime.now().isoformat()
+    }
+    
+    os.makedirs(MODEL_SAVE_PATH, mode=0o777, exist_ok=True)
+    with open(f"{MODEL_SAVE_PATH}/best_params.json", 'w') as f:
+        json.dump(tuning_config, f, indent=2)
+    
+    logger.info("Global hyperparameter tuning complete - results saved to best_params.json")
 
 
 

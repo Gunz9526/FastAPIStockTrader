@@ -88,12 +88,12 @@ class RegimeDetector:
             else:
                 regime = MarketRegime.SIDEWAYS_CALM
             
-            # logger.info(
-            #     "레짐 감지: %s (ADX=%.1f, ATR%%=%.3f, VIX=%s, 트렌드=%s)",
-            #     regime.value, adx, atr_pct, 
-            #     f"{vix_value:.1f}" if vix_value else 'N/A',
-            #     'UP' if trend_up else 'DOWN'
-            # )
+            logger.info(
+                "레짐 감지: %s (ADX=%.1f, ATR%%=%.3f, VIX=%s, 트렌드=%s)",
+                regime.value, adx, atr_pct, 
+                f"{vix_value:.1f}" if vix_value else 'N/A',
+                'UP' if trend_up else 'DOWN'
+            )
             
             return regime
             
@@ -158,9 +158,43 @@ REGIME_RISK_PARAMS: Dict[MarketRegime, Dict[str, float]] = {
 }
 
 def get_regime_strategy_weights(regime: MarketRegime) -> Dict[str, float]:
-    """Get strategy weights for current regime."""
-    return REGIME_STRATEGY_WEIGHTS.get(regime, REGIME_STRATEGY_WEIGHTS[MarketRegime.SIDEWAYS_CALM])
+    """
+    Get strategy weights for current regime.
+    
+    Args:
+        regime: Market regime enum
+    
+    Returns:
+        Dict of strategy weights
+    """
+    if regime not in REGIME_STRATEGY_WEIGHTS:
+        logger.warning(
+            "Invalid regime '%s' provided. Using SIDEWAYS_CALM fallback. "
+            "Valid regimes: %s",
+            regime,
+            list(REGIME_STRATEGY_WEIGHTS.keys())
+        )
+        return REGIME_STRATEGY_WEIGHTS[MarketRegime.SIDEWAYS_CALM]
+    
+    return REGIME_STRATEGY_WEIGHTS[regime]
 
 def get_regime_risk_params(regime: MarketRegime) -> Dict[str, float]:
-    """Get risk parameters for current regime."""
-    return REGIME_RISK_PARAMS.get(regime, REGIME_RISK_PARAMS[MarketRegime.SIDEWAYS_CALM])
+    """
+    Get risk parameters for current regime.
+    
+    Args:
+        regime: Market regime enum
+    
+    Returns:
+        Dict of risk parameters
+    """
+    if regime not in REGIME_RISK_PARAMS:
+        logger.warning(
+            "Invalid regime '%s' provided. Using SIDEWAYS_CALM fallback. "
+            "Valid regimes: %s",
+            regime,
+            list(REGIME_RISK_PARAMS.keys())
+        )
+        return REGIME_RISK_PARAMS[MarketRegime.SIDEWAYS_CALM]
+    
+    return REGIME_RISK_PARAMS[regime]

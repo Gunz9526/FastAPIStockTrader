@@ -119,7 +119,7 @@ def collect_vix_data(self, days: int = 7):
                 latest_vix_time.isoformat()
             )
             
-            logger.info(f"✅ Redis VIX 캐시: {latest_vix_value:.2f} (source: {data_source})")
+            logger.info(f"Redis VIX 캐시: {latest_vix_value:.2f} (source: {data_source})")
         
         except Exception as redis_err:
             logger.error(f"Redis VIX 캐시 실패: {redis_err}")

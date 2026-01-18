@@ -129,16 +129,15 @@ class SyncTradingStrategy:
                 logger.warning("Failed to generate SPY features for regime detection")
                 return
             
-            # Phase F.3: Redis 캠시에서 VIX 값 가져오기
             vix_value = None
             try:
                 from app.core.cache import cache
                 vix_cached = cache.get("vix:latest")
                 if vix_cached:
                     vix_value = float(vix_cached)
-                    logger.info("캠시에서 VIX 값 가져오기: %.2f", vix_value)
+                    logger.info("캐시에서 VIX 값 가져오기: %.2f", vix_value)
             except (ImportError, ValueError, TypeError) as e:
-                logger.debug("캠시에서 VIX 가져오기 실패: %s", str(e))
+                logger.debug("캐시에서 VIX 가져오기 실패: %s", str(e))
             
             # VIX 강화로 레짐 감지
             regime = self.regime_detector.detect_regime(features_df, vix_value=vix_value)
@@ -215,12 +214,12 @@ class SyncTradingStrategy:
     def _execute_trade_logic(self, symbol: str, prediction: float, current_price: float):
         """
         Execute trade based on prediction + sentiment + fundamentals.
-        Phase F: Adaptive signal adjustment with auto-weighted factors.
+        Adaptive signal adjustment with auto-weighted factors.
         """
-        # Phase F: sentiment와 fundamentals 가져오기
+        # sentiment와 fundamentals 가져오기
         sentiment_score, fundamentals = self._get_phase_f_signals(symbol)
         
-        # Phase F: 가중치 기반 예측 조정
+        # 가중치 기반 예측 조정
         adjusted_prediction = self._calculate_adjusted_signal(
             ml_prediction=prediction,
             sentiment_score=sentiment_score,
@@ -286,7 +285,7 @@ class SyncTradingStrategy:
         fundamentals = {'pe_ratio': 15.0, 'pb_ratio': 3.0, 'overvalued': False}
         
         try:
-            # 캠시에서 sentiment 가져오기 (1시간 TTL)
+            # 캐시에서 sentiment 가져오기 (1시간 TTL)
             if self.sentiment_analyzer:
                 sentiment_score = self.sentiment_analyzer.get_sentiment_from_cache(symbol)
                 if sentiment_score is None:
@@ -295,7 +294,7 @@ class SyncTradingStrategy:
             logger.debug("%s sentiment 가져오기 실패: %s", symbol, str(e))
         
         try:
-            # Fundamentals 가져오기 (yfinance LRU 캠시)
+            # Fundamentals 가져오기 (yfinance LRU 캐시)
             if self.fundamental_provider:
                 fund_data = self.fundamental_provider.get_fundamentals(symbol)
                 if fund_data:
@@ -678,7 +677,7 @@ class SyncTradingStrategy:
             logger.error("%s BUY 주문 실패: %s", symbol, str(e))
     
     def _process_sell_signal(self, symbol: str, signal_data: Dict):
-        """Process SELL signal with defense checks."""
+        """Process SELL signal with regime-aware defense checks."""
         try:
             # 활성 포지션 가져오기
             active_position = self.repo.get_active_position(symbol)
@@ -686,24 +685,68 @@ class SyncTradingStrategy:
                 return
             
             current_price = signal_data['price']
+            entry_price = active_position.entry_price
             
-            # 종료 조건 확인 (Phase I.1 방어)
-            can_exit, reason = self.risk_manager.can_exit_position(
+            # 손익 계산
+            pnl_pct = (current_price - entry_price) / entry_price
+            
+            # 1. 강제 청산 조건 (방어 규칙 무시)
+            force_exit = False
+            force_reason = ""
+            
+            # 1-1. 레짐 기반 강제 청산
+            if self.current_regime == MarketRegime.BEAR_TRENDING:
+                force_exit = True
+                force_reason = f"REGIME_FORCE: BEAR_TRENDING (손익: {pnl_pct:.2%})"
+            
+            # 1-2. 손절 강제 청산 (-3% 이하)
+            elif pnl_pct <= -0.03:
+                force_exit = True
+                force_reason = f"STOP_LOSS: {pnl_pct:.2%} <= -3.0%"
+            
+            # 1-3. 강한 매도 신호 (-0.01 이하 = -1% 예상 하락)
+            elif signal_data['signal'] <= -0.01:
+                force_exit = True
+                force_reason = f"STRONG_SELL: signal={signal_data['signal']:.4f}"
+            
+            # 1-4. SIDEWAYS_VOLATILE에서 빠른 익절 (변동성 높으므로)
+            elif self.current_regime == MarketRegime.SIDEWAYS_VOLATILE and pnl_pct >= 0.02:
+                force_exit = True
+                force_reason = f"REGIME_TAKE_PROFIT: VOLATILE + {pnl_pct:.2%}"
+            
+            if force_exit:
+                logger.info("%s 강제 SELL: %s", symbol, force_reason)
+                self._execute_sell_order(symbol, active_position, current_price, force_reason)
+                return
+            
+            # 2. 일반 매도 조건 (방어 규칙 적용)
+            can_exit, defense_reason = self.risk_manager.can_exit_position(
                 symbol=symbol,
-                entry_price=active_position.entry_price,
+                entry_price=entry_price,
                 current_price=current_price,
                 entry_time=active_position.entry_time
             )
             
-            if not can_exit and signal_data['signal'] >= -0.002:
-                # 약한 SELL 신호 + 방어 차단
-                logger.info("%s SELL 차단: %s", symbol, reason)
+            # 2-1. 명확한 매도 신호 확인 (신호 < -0.005 = -0.5% 예상 하락)
+            has_sell_signal = signal_data['signal'] < -0.005
+            
+            if not can_exit and not has_sell_signal:
+                # 방어 차단 + 약한 신호 → SELL 차단
+                logger.info("%s SELL 차단: %s (신호: %.4f)", symbol, defense_reason, signal_data['signal'])
                 return
             
-            logger.info("%s SELL 허용: %s", symbol, reason)
+            # 2-2. 방어 허용 또는 명확한 신호 → SELL 실행
+            sell_reason = f"DEFENSE_OK: {defense_reason}" if can_exit else f"STRONG_SIGNAL: {signal_data['signal']:.4f}"
+            logger.info("%s SELL 허용: %s (손익: {pnl_pct:.2%})", symbol, sell_reason)
+            self._execute_sell_order(symbol, active_position, current_price, sell_reason)
             
-            # alpaca-py로 주문
-            qty = active_position.quantity
+        except (ValueError, AttributeError, TypeError) as e:
+            logger.error("%s SELL 주문 실패: %s", symbol, str(e))
+    
+    def _execute_sell_order(self, symbol: str, position, current_price: float, reason: str):
+        """Execute SELL order (extracted for reuse)."""
+        try:
+            qty = position.quantity
             order_data = MarketOrderRequest(
                 symbol=symbol,
                 qty=qty,
@@ -712,12 +755,14 @@ class SyncTradingStrategy:
             )
             order = self.api.submit_order(order_data=order_data)
             
-            logger.info("주문 실행: SELL %s (ID: %s)", symbol, order.id)
+            logger.info("주문 실행: SELL %s x%d @ $%.2f (ID: %s, 이유: %s)", 
+                       symbol, qty, current_price, order.id, reason)
             
             # DB 업데이트
-            self.repo.update_position_exit(active_position.id, current_price)
+            self.repo.update_position_exit(position.id, current_price)
             self.risk_manager.record_position_exit(symbol)
             self.session.commit()
             
-        except (ValueError, AttributeError, TypeError) as e:
-            logger.error("%s SELL 주문 실패: %s", symbol, str(e)) 
+        except Exception as e:
+            logger.error("%s SELL 주문 실행 실패: %s", symbol, str(e))
+            raise 
