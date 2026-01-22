@@ -57,8 +57,8 @@ Define file names:
 
 ### 3.3 Plan Creation Workflow
 1. **Draft Plan (English):** Write technical plan at `EN_PATH`
-   - **Sections:** Objective, Technical Approach, File Changes, Testing Strategy, Risks
-   - **Format:** Markdown with code blocks, file paths, dependencies
+   - **Sections:** Objective, Technical Approach, File Changes, **Test Scenarios (Mandatory)**, Risks
+   - **Test Scenarios:** Define at least 1 Happy Path and 1 Edge Case to be verified.
    
 2. **Translate Plan (Korean):** Write Korean version at `KR_PATH`
    - Keep technical terms in English (e.g., "Celery Beat", "TimeSeriesSplit")
@@ -91,6 +91,13 @@ If the plan involves a significant architectural decision (e.g., adding Redis, c
 
 ## 👥 4. PHASE 3: DELEGATION (Context Enforcement)
 
+### 4.0 Sub-Agent Roster (Standard Personas)
+Define the specific role for the task:
+1. **Backend Architect:** Focus on Clean Architecture, DB Schema, API Design.
+2. **Quant Researcher:** Focus on ML models, Financial Math (Sharpe, Kelly), Backtesting logic.
+3. **QA Engineer:** Focus on Edge cases, Integration tests, Security checks.
+
+*Assign the most appropriate persona via the Rule File.*
 ### 4.1 Rule Management Protocol
 1. **Check Existing Rules:** Look in `.agent/rules/`
 2. **Decide Strategy:**
@@ -188,15 +195,18 @@ grep -r "^def " app/ | cut -d: -f1,2 > functions.txt
 - **Coverage:** Ensure critical paths (money handling, order execution) have integration tests.
 
 ### 5.2 Decision Making
-- **PASS:** Mark task complete, proceed to next
-- **FAIL:** **REJECT** with specific issues, request fixes
+- **PASS:** Mark task complete, proceed to next.
+- **FAIL (Self-Correction Loop):**
+  1. **Analyze Error:** Identify why verification failed (e.g., "Unused import in `main.py`").
+  2. **Reflect:** Explain the fix strategy in English.
+  3. **Retry:** Re-generate code with the fix applied (Max 3 attempts).
 
-### 5.3 Safety Circuit Breaker
-- Allow max **3 retries** per task
-- If still failed:
-  1. **STOP** the agent
-  2. Use **Web Search** for solutions
-  3. Escalate to user for guidance
+### 5.3 Safety Circuit Breaker (Root Cause Analysis)
+- If failed after 3 retries:
+  1. **STOP** the agent.
+  2. **Generate RCA:** Create `.agent/troubleshooting/RCA_{Date}_{Task}.md`.
+     - *Format:* Symptom, Root Cause Hypothesis, Failed Attempts, Recommended Manual Fix.
+  3. **Escalate:** Notify user in Korean with the RCA file.
 ---
 
 ## 📊 6. PHASE 5: FINAL REPORTING & ROADMAP UPDATE
