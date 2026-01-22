@@ -180,11 +180,19 @@ class PositionTracking(Base):
     
     exit_time: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     exit_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    regime: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, index=True)
     
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     ticker: Mapped["StockTicker"] = relationship(back_populates="position_tracking")
+    
+    @property
+    def pnl(self) -> Optional[float]:
+        """Calculate realized P&L if position is closed."""
+        if self.exit_price and self.exit_time:
+            return (self.exit_price - self.entry_price) * self.quantity
+        return None
 
 __table_args__ = (
     Index('idx_positions_symbol_status', Position.symbol, Position.status),

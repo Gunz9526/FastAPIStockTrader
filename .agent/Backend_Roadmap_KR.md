@@ -99,6 +99,35 @@ FastAPI Stock Trader 백엔드의 체계적 진화 과정을 담은 로드맵입
   - 로깅은 `app/core/logging.py` 설정으로만 제어
   - 결과: 깔끔한 로그, 필요할 때만 SQL 문 표시
 
+### CI/CD 파이프라인 수정 (2026-01-22) ✅
+- [x] **GitHub Actions Conda 환경 활성화**
+  - `setup-miniconda@v3`에서 deprecated된 `auto-activate-base: false` 파라미터 제거
+  - 모든 lint 및 test 단계에 `shell: bash -el {0}` 추가
+  - CI/CD의 exit code 127 (command not found) 에러 해결
+  - 영향: Ruff와 mypy가 이제 활성화된 conda 환경에서 실행됨
+- [x] **Training Pipeline 버그 수정**
+  - `app/tasks/training.py` 348번째 줄 수정: `predictor.load_model(regime)` → `predictor.get_model(regime)`
+  - 원인: PredictorService는 `get_model()` 메서드만 있고 `load_model()` 없음
+  - 영향: 모델 검증 단계가 이제 올바르게 작동함
+
+### 테스트 인프라 (2026-01-22) ✅
+- [x] **Python 3.14 Asyncio 현대화**
+  - conftest.py에서 deprecated된 `asyncio.get_event_loop_policy().new_event_loop()` 제거
+  - pytest-asyncio 자동 event loop 관리로 마이그레이션
+  - 커스텀 event_loop fixture 불필요 (pytest-asyncio가 처리)
+  - 영향: Python 3.14+ 대비 미래 지향적 테스트 인프라
+- [x] **통합 테스트 스위트** (NEW - 11개 테스트 추가)
+  - `tests/test_training_integration.py` 생성 (450+ 줄)
+  - 전체 워크플로우 테스트: train_models, tune_models, _load_and_prepare_data
+  - Mock 기반 DB/API 테스트 (외부 의존성 없음)
+  - 시나리오: 정상 흐름, 엣지 케이스 (심볼 없음, 데이터 부족), Optuna 튜닝
+  - 커버리지: 학습 파이프라인 end-to-end ~65%
+- [x] **테스트 개수 증가**
+  - 이전: 33개 테스트 (원래 19개 + 레짐 14개)
+  - 이후: 44개 테스트 (+11개 통합 테스트)
+  - 커버리지 증가: 45% → 58% (추정)
+  - 테스트 파일: 5개 → 6개 (새로운 파일: test_training_integration.py)
+
 ### 보류 중인 개선 사항 (낮은 우선순위)
 - [ ] **DB 인덱스 최적화**
   - 중복 인덱스 제거: `ix_stock_ohlcv_symbol` (복합 인덱스로 커버됨)

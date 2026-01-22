@@ -425,7 +425,9 @@ class SyncTradingStrategy:
                 if side == "buy":
                     from datetime import datetime
                     entry_time = datetime.now()
-                    self.repo.record_position_entry(symbol, price, qty, entry_time)
+                    # Record current market regime
+                    regime_str = self.current_regime.value if self.current_regime else None
+                    self.repo.record_position_entry(symbol, price, qty, entry_time, regime=regime_str)
                     self.risk_manager.record_position_entry(symbol, entry_time)
                     self.db.commit()
                 elif side == "sell":
@@ -454,7 +456,7 @@ class SyncTradingStrategy:
         Strategy:
         1. Circuit Breaker 확인 (일일 손실, VIX 극단치)
         2. Detect market regime
-        3. Get current active positions
+        3. Get current active positions (Alpaca API - Source of Truth)
         4. Calculate Kelly position sizes for each symbol
         5. Select uncorrelated symbols (max 5 positions)
         6. Execute BUY/SELL orders based on signals and portfolio optimization
@@ -485,9 +487,25 @@ class SyncTradingStrategy:
             # 1. 시장 레짐 감지
             self.detect_market_regime()
             
-            # 2. 현재 활성 포지션 가져오기
-            active_positions = self.portfolio_repo.get_all_active_positions()
-            active_symbols = {pos['symbol'] for pos in active_positions}
+            # 2. 현재 활성 포지션 가져오기 (Alpaca API - Source of Truth)
+            try:
+                alpaca_positions = self.api.get_all_positions()
+                active_positions = [
+                    {
+                        'symbol': pos.symbol,
+                        'qty': int(pos.qty),
+                        'entry_price': float(pos.avg_entry_price),
+                        'current_price': float(pos.current_price),
+                        'unrealized_pl': float(pos.unrealized_pl)
+                    }
+                    for pos in alpaca_positions
+                ]
+                active_symbols = {pos['symbol'] for pos in active_positions}
+                logger.info("Alpaca 활성 포지션: %s", list(active_symbols))
+            except Exception as e:
+                logger.error("Alpaca 포지션 조회 실패: %s", e, exc_info=True)
+                active_positions = []
+                active_symbols = set()
             
             logger.info("활성 포지션: %d / %d", len(active_positions), self.max_positions)
             
@@ -669,7 +687,8 @@ class SyncTradingStrategy:
             
             # DB에 기록
             entry_time = datetime.now()
-            self.repo.record_position_entry(symbol, current_price, qty, entry_time)
+            regime_str = self.current_regime.value if self.current_regime else None
+            self.repo.record_position_entry(symbol, current_price, qty, entry_time, regime=regime_str)
             self.risk_manager.record_position_entry(symbol, entry_time)
             self.session.commit()
             

@@ -21,7 +21,6 @@ jobs:
         channel-priority: strict
         activate-environment: trading
         environment-file: environment.yml
-        auto-activate-base: false
     
     - name: Install linting dependencies
       shell: bash -el {0}
@@ -30,10 +29,12 @@ jobs:
         pip install -e . --no-deps
         
     - name: Lint with Ruff
+      shell: bash -el {0}
       run: |
         ruff check . --output-format=github
         
     - name: Type check with mypy
+      shell: bash -el {0}
       run: |
         mypy app --ignore-missing-imports --no-error-summary || true
 
@@ -71,7 +72,6 @@ jobs:
         channel-priority: strict
         activate-environment: trading
         environment-file: environment.yml
-        auto-activate-base: false
     
     - name: Install test dependencies
       shell: bash -el {0}

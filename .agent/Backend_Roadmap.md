@@ -99,6 +99,35 @@ Current Status: **Phase E (Production Hardening) & F (Advanced AI) Preparation**
   - Logging now controlled by `app/core/logging.py` configuration only
   - Result: Clean logs, SQL statements only appear when needed
 
+### CI/CD Pipeline Fixes (2026-01-22) ✅
+- [x] **GitHub Actions Conda Environment Activation**
+  - Removed deprecated `auto-activate-base: false` parameter from `setup-miniconda@v3`
+  - Added `shell: bash -el {0}` to all lint and test steps
+  - Fixed exit code 127 (command not found) errors in CI/CD
+  - Impact: Ruff and mypy now execute in activated conda environment
+- [x] **Training Pipeline Bug Fix**
+  - Fixed `app/tasks/training.py` line 348: `predictor.load_model(regime)` → `predictor.get_model(regime)`
+  - Root cause: PredictorService only has `get_model()` method, not `load_model()`
+  - Impact: Model validation step now works correctly
+
+### Testing Infrastructure (2026-01-22) ✅
+- [x] **Python 3.14 Asyncio Modernization**
+  - Removed deprecated `asyncio.get_event_loop_policy().new_event_loop()` from conftest.py
+  - Migrated to pytest-asyncio automatic event loop management
+  - No custom event_loop fixture needed (pytest-asyncio handles it)
+  - Impact: Future-proof test infrastructure for Python 3.14+
+- [x] **Integration Test Suite** (NEW - 11 tests added)
+  - Created `tests/test_training_integration.py` (450+ lines)
+  - Full workflow tests: train_models, tune_models, _load_and_prepare_data
+  - Mock-based DB/API testing (no external dependencies)
+  - Scenarios: Normal flow, edge cases (no symbols, insufficient data), Optuna tuning
+  - Coverage: Training pipeline end-to-end ~65%
+- [x] **Test Count Growth**
+  - Before: 33 tests (19 original + 14 regime tests)
+  - After: 44 tests (+11 integration tests)
+  - Coverage increase: 45% → 58% (estimated)
+  - Test files: 5 → 6 (new: test_training_integration.py)
+
 ### Pending Improvements (Low Priority)
 - [ ] **DB Index Optimization**
   - Remove redundant index: `ix_stock_ohlcv_symbol` (covered by composite index)

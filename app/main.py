@@ -45,6 +45,23 @@ async def metrics_middleware(request: Request, call_next):
     method = request.method
     endpoint = request.url.path
     
+    # Extract client IP (handles X-Forwarded-For for proxies)
+    client_ip = request.client.host if request.client else "unknown"
+    forwarded_for = request.headers.get("X-Forwarded-For")
+    if forwarded_for:
+        client_ip = forwarded_for.split(",")[0].strip()
+    
+    # Log incoming request with IP
+    logger.info(
+        f"[{method}] {endpoint} - IP: {client_ip}",
+        extra={
+            "client_ip": client_ip,
+            "method": method,
+            "endpoint": endpoint,
+            "user_agent": request.headers.get("User-Agent", "unknown")
+        }
+    )
+    
     start_time = time.time()
     response = await call_next(request)
     duration = time.time() - start_time

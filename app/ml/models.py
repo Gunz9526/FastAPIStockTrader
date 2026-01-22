@@ -189,10 +189,11 @@ class XGBoostWrapper(ModelWrapper):
         return self.model.predict(X)
 
     def save(self, path: str):
-        joblib.dump(self.model, path)
+        self.model.save_model(path)
     
     def load(self, path: str):
-        self.model = joblib.load(path)
+        self.model = XGBRegressor()
+        self.model.load_model(path)
 
 class EnsembleWrapper(ModelWrapper):
     def __init__(self, weights: List[float] = None, model_params: Dict[str, Dict] = None):

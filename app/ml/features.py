@@ -104,7 +104,9 @@ class FeatureEngineer:
             df['bb_middle'] = middle
             df['bb_lower'] = lower
             df['bb_width'] = (upper - lower) / middle  # Normalized width
-            df['bb_position'] = (close - lower) / (upper - lower)  # Position within bands
+            # Prevent divide-by-zero: add epsilon to denominator
+            band_range = upper - lower
+            df['bb_position'] = (close - lower) / (band_range + 1e-8)  # Safe division
             
             # 4. Moving Averages
             df['sma_20'] = talib.SMA(close, timeperiod=20)

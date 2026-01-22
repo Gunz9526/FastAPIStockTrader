@@ -65,7 +65,8 @@ class SyncStockRepository:
         symbol: str,
         entry_price: float,
         quantity: int,
-        entry_time: Optional[datetime] = None
+        entry_time: Optional[datetime] = None,
+        regime: Optional[str] = None
     ) -> PositionTracking:
         """
         Record position entry for defense mechanisms.
@@ -75,6 +76,7 @@ class SyncStockRepository:
             entry_price: Entry price
             quantity: Position size
             entry_time: Entry timestamp (default: now)
+            regime: Market regime at entry time (Phase H)
         
         Returns:
             Created PositionTracking record
@@ -86,7 +88,8 @@ class SyncStockRepository:
             symbol=symbol,
             entry_time=entry_time,
             entry_price=float(entry_price),  # Convert NumPy types to native Python
-            quantity=int(quantity)
+            quantity=int(quantity),
+            regime=regime
         )
         self.db.add(position)
         self.db.flush()

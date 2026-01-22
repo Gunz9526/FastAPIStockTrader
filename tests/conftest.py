@@ -1,6 +1,6 @@
 import pytest
-import asyncio
-from typing import AsyncGenerator, Generator
+import pytest_asyncio
+from typing import AsyncGenerator
 from httpx import AsyncClient, ASGITransport
 from app.main import app
 from app.core.config import settings
@@ -8,14 +8,12 @@ from app.core.config import settings
 # Override settings for tests
 settings.API_SECRET_KEY = "test_api_key"
 
-@pytest.fixture(scope="session")
-def event_loop() -> Generator:
-    loop = asyncio.get_event_loop_policy().new_event_loop()
-    yield loop
-    loop.close()
+# Python 3.14+: Use pytest_asyncio.fixture for async fixtures
+# This ensures proper event loop management
 
-@pytest.fixture(scope="module")
+@pytest_asyncio.fixture(scope="module")
 async def client() -> AsyncGenerator[AsyncClient, None]:
+    """Async HTTP client for testing FastAPI endpoints."""
     headers = {"X-API-Key": "test_api_key"}
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test", headers=headers) as c:
         yield c

@@ -99,8 +99,16 @@ services:
     image: grafana/grafana
     ports:
       - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/dashboard.json:/etc/grafana/provisioning/dashboards/dashboard.json:ro
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_INSTALL_PLUGINS=
     depends_on:
       - prometheus
+    restart: unless-stopped
 
   flower:
     image: mher/flower
@@ -119,3 +127,4 @@ services:
 
 volumes:
   postgres_data:
+  grafana_data:

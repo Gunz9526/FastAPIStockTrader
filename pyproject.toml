@@ -29,7 +29,7 @@ dependencies = [
     "joblib>=1.3.2",
     "ta-lib>=0.6.0",
     # Alpaca
-    "alpaca-py>=0.30.0",
+    "alpaca-py>=0.43.2",
     # Monitoring
     "prometheus-fastapi-instrumentator>=7.0.0",
     # Data

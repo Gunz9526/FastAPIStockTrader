@@ -4,24 +4,30 @@ from app.ml.features import FeatureEngineer
 from app.services.risk_manager import RiskManager
 
 def test_risk_manager():
-    rm = RiskManager(max_position_size_pct=0.1, stop_loss_pct=0.02)
+    rm = RiskManager(
+        max_position_size_pct=0.1,
+        stop_loss_atr_multiplier=2.0,
+        take_profit_atr_multiplier=3.0
+    )
     
-    # 1. Normal Buy
-    # Balance 100,000 -> Max Pos 10,000. Price 100 -> Qty 100.
-    allowed, qty = rm.check_buy_signal("AAPL", 100.0, 100000.0)
+    # 1. Normal Position Sizing
+    # Balance 100,000 -> Max Pos 10% = 10,000. Price 100 -> Qty 100.
+    allowed, qty = rm.calculate_position_size("AAPL", 100.0, 100000.0)
     assert allowed is True
     assert qty == 100
 
-    # 2. Insufficient Funds (Price > Max Pos)
+    # 2. Insufficient Funds (Price > Max Position)
     # Max Pos 10,000. Price 11,000. Qty 0.
-    allowed, qty = rm.check_buy_signal("BRK.A", 11000.0, 100000.0)
+    allowed, qty = rm.calculate_position_size("BRK.A", 11000.0, 100000.0)
     assert allowed is False
     assert qty == 0
 
-    # 3. Exit Prices
-    sl, tp = rm.get_exit_prices(100.0)
-    assert sl == 98.0 # 2% down
-    assert tp == 105.0 # 5% up (default)
+    # 3. Dynamic Exit Prices (ATR-based, mock ATR=2.0)
+    atr = 2.0
+    sl, tp, trailing = rm.calculate_exit_prices(100.0, atr)
+    assert sl == 100.0 - (2.0 * 2.0)  # 96.0 (stop_loss_atr_mult=2.0)
+    assert tp == 100.0 + (3.0 * 2.0)  # 106.0 (take_profit_atr_mult=3.0)
+    assert trailing == 100.0 - (1.5 * 2.0)  # 97.0 (trailing_stop_atr_mult=1.5)
 
 def test_feature_engineer():
     # Mock OHLCV
