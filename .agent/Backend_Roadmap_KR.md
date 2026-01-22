@@ -1,0 +1,343 @@
+# 백엔드 로드맵 🚀
+
+FastAPI Stock Trader 백엔드의 체계적 진화 과정을 담은 로드맵입니다.
+현재 상태: **Phase E (프로덕션 강화) & F (고급 AI) 준비 중**
+
+---
+
+## ✅ 완료된 단계 (이력)
+
+### Phase A: 핵심 거래 시스템
+- [x] **FastAPI 설정** (Clean Architecture, Async/Sync 분리)
+- [x] **데이터베이스** (PostgreSQL + TimescaleDB, SQLAlchemy)
+- [x] **Alpaca API** (시장 데이터 & 거래 실행 통합)
+- [x] **특성 생성** (TA-Lib 기술적 지표)
+
+### Phase B: 안정성 & 자동화
+- [x] **Celery 작업 큐** (Redis Broker, 동기 워커 모드)
+- [x] **스케줄러** (Celery Beat 설정)
+- [x] **Docker 보안** (Non-root 사용자, 취약점 스캔)
+
+### Phase C: 성능 최적화 (지연시간 & 처리량)
+- [x] **DB 최적화** (TimescaleDB Hypertables, Continuous Aggregates)
+- [x] **캐싱 레이어** (Redis: OHLCV, 포지션, 계좌 정보 with TTL)
+- [x] **커넥션 풀링** (SQLAlchemy QueuePool, PgBouncer 준비)
+- [x] **모니터링** (Prometheus 메트릭, 헬스 체크)
+
+### Phase D: ML 코어 (학습 & 튜닝)
+- [x] **모델 아키텍처** (앙상블: CatBoost + LGBM + XGBoost)
+- [x] **하이퍼파라미터 튜닝** (Optuna 프레임워크, 동적 Sharpe:F1 비율)
+- [x] **데이터 전략** (24개월 롤링 윈도우, TimeSeriesSplit)
+- [x] **특성 엔지니어링** (TA-Lib 15+ 지표)
+- [x] **백테스팅 시스템** (Backtrader 엔진, CLI 검증)
+
+---
+
+## 🧹 코드 품질 & 정리 (진행 중)
+
+**목표**: 리팩토링, 최적화, 모범 사례를 통해 높은 코드 품질 유지
+
+### 완료된 개선 사항 (2026-01-05) ✅
+- [x] **미사용 파라미터 정리**
+  - `app/tasks/training.py::_train_regime_specific_models`: `repo: SyncStockRepository`와 `end_date: pd.Timestamp` 파라미터 제거
+  - `_walk_forward_validation` 로직 인라인화 (15줄 TimeSeriesSplit)
+  - 결과: 깔끔한 함수 시그니처, 미사용 변수 없음
+- [x] **섹터 조회 우선순위 역전**
+  - `app/ml/sector_map.py::get_sector()`: API 우선 전략으로 변경
+  - 우선순위: yfinance API (실시간) → 수동 SECTOR_MAP (백업)
+  - 근거: 실시간 데이터가 정적 매핑보다 정확
+- [x] **백필 스크립트 생성**
+  - `scripts/backfill_sectors.py`: 기존 심볼용 70줄 스크립트
+  - 사용법: `docker compose exec app python scripts/backfill_sectors.py`
+  - 목적: sector_id가 NULL인 심볼의 섹터 데이터 업데이트
+
+### 중대 버그 수정 (2026-01-06) ✅
+- [x] **Gemini API 마이그레이션** (google-generativeai → google-genai)
+  - Deprecated된 `google-generativeai`에서 공식 `google-genai>=1.33.0` SDK로 마이그레이션
+  - `app/services/sentiment_analyzer.py` 업데이트: Client 기반 API 패턴
+  - Import 변경: `from google import genai` → `genai.Client(api_key=...)`
+  - 모델 업데이트: `gemini-pro` → `gemini-2.0-flash-exp`
+  - API 호출: `client.models.generate_content(model=..., contents=...)`
+- [x] **피처 파이프라인 수정** (학습 KeyError 해결)
+  - `FeatureEngineer`에 `base_feature_columns` 속성 추가 (19개 기술 지표만)
+  - 학습용 피처(base)와 예측용 피처(전체 24개, Phase F 포함) 분리
+  - `app/tasks/training.py` 95번째 줄: 히스토리컬 데이터 학습에 `base_feature_columns` 사용
+  - `app/tasks/training.py` 667번째 줄: Feature importance도 `base_feature_columns` 사용
+  - 원인: Phase F 피처(감성, 펀더멘털)가 히스토리컬 OHLCV 데이터에 없음
+- [x] **SQL 로깅 감소**
+  - `app/core/database.py`에서 SQLAlchemy echo 비활성화 (async, sync 엔진 모두)
+  - `echo=settings.ENV_STATE == "dev"` → `echo=False`로 변경
+  - 로깅은 `app/core/logging.py` 설정으로만 제어
+  - 결과: 깔끔한 로그, 필요할 때만 SQL 문 표시
+
+### 보류 중인 개선 사항 (낮은 우선순위)
+- [ ] **DB 인덱스 최적화**
+  - 중복 인덱스 제거: `ix_stock_ohlcv_symbol` (복합 인덱스로 커버됨)
+  - 복합 인덱스 추가: `idx_ohlcv_timeframe_symbol_time` (다중 타임프레임 쿼리용)
+  - 부분 인덱스 추가: `WHERE vwap IS NOT NULL` (VWAP 전용 쿼리)
+- [ ] **코드 중복 분석**
+  - 서비스 전반의 유사 로직 식별
+  - 공통 패턴을 유틸리티 함수로 추출
+- [ ] **타입 힌트 강화**
+  - 레거시 함수에 누락된 타입 힌트 추가
+  - 엄격한 mypy 검사 활성화
+
+---
+
+## 🚧 Phase E: 프로덕션 강화 (현재 초점)
+
+**목표**: 시스템이 라이브 환경에서 자율적이고 견고하게 작동하도록 보장
+
+### E.1 운영 안정성
+- [ ] **Alpaca WebSocket** (실시간 주문 업데이트)
+  - 폴링을 이벤트 기반 업데이트로 교체
+- [ ] **서킷 브레이커** (리스크 관리)
+  - 일일 손실 > 3% 또는 $500 시 거래 중단
+  - API 지연 > 3000ms 시 자동 주문 중단
+- [ ] **알림 시스템** (Discord/Slack Webhook)
+  - 알림 대상: 거래 실행, 중대 오류, 리스크 한계
+
+### E.2 인프라 고가용성
+- [ ] **PostgreSQL 복제** (Primary-Replica 설정 계획)
+- [ ] **Redis 영속성** (AOF/RDB 정책 확인)
+- [ ] **로그 집계** (중앙 집중식 로깅 설정 계획)
+
+---
+
+## 🔮 Phase F: 고급 AI 역량 (95% 완료)
+
+**목표**: "기술적 트레이더"에서 감성 분석, 펀더멘털, 고급 분석을 갖춘 "AI 헤지펀드"로 전환
+
+### F.1 감성 분석 통합 (100% 완료) ✅
+*AI 기반 분석을 통한 실시간 뉴스 감성*
+- [x] **SentimentAnalyzer 서비스** (2026-01-05 완료)
+  - JSON 파싱을 통한 Gemini API 통합
+  - Redis 캐싱 (1시간 TTL): `sentiment:{symbol}`
+  - 감성 점수: -1.0 (극도 부정) ~ +1.0 (극도 긍정)
+  - 국면별 가중치 조정: 강세장은 긍정 선호, 약세장은 부정 선호
+- [x] **Celery 자동화** (2026-01-05 완료)
+  - `update_sentiment_scores`: 매시간 업데이트 (crontab: `minute=0, hour=*`)
+  - `clear_stale_sentiment_cache`: 일일 정리 (자정)
+- [x] **특성 통합** (2026-01-05 완료)
+  - ML 특성 벡터에 `sentiment_score` 추가 (20번째 특성)
+  - `add_sentiment_and_fundamentals()` 편의 메서드
+- [x] **Finnhub 통합** (2026-01-05 완료)
+  - 프리미엄 금융 뉴스 API (Reuters, Bloomberg, WSJ 등)
+  - 엔드포인트: GET /v1/company-news
+  - 무료 티어: 60 calls/minute (매시간 업데이트 충분)
+  - 프로덕션: $59/month (Professional 플랜)
+  - 심볼당 상위 10개 기사 (datetime 정렬)
+  - 응답: headline, summary, source, url, datetime
+  - 에러 핸들링: RequestException, timeout (10초)
+  - NewsAPI.org 대비 우수한 뉴스 품질
+
+### F.2 펀더멘털 메트릭 통합 (100% 완료) ✅
+*재무 건전성 메트릭으로 특성 엔지니어링 강화*
+- [x] **FundamentalDataProvider 서비스** (2026-01-05 완료)
+  - LRU 캐시를 사용한 yfinance API 통합 (maxsize=500, 24시간 TTL)
+  - 메트릭: PE 비율, PB 비율, ROE, 배당 수익률, 시가총액, 베타
+  - 주식 분류: VALUE, GROWTH, INCOME, BLEND, UNKNOWN
+  - 위험 조정 점수: `(ROE / PE) * (1 + Div_Yield) / Beta`
+- [x] **특성 통합** (2026-01-05 완료)
+  - 4개 펀더멘털 특성 추가: `pe_ratio`, `pb_ratio`, `roe`, `beta`
+  - 기본값: PE=15.0, PB=3.0, ROE=0.10, Beta=1.0 (시장 평균)
+  - 총 특성: 20 → 24 (감성 포함)
+- [x] **섹터 자동 수집** (2026-01-05 완료)
+  - 우선순위: yfinance API → 수동 SECTOR_MAP 백업
+  - LRU 캐시 (maxsize=1000)로 과도한 API 호출 방지
+  - 11개 섹터 카테고리 + Unknown=99
+  - 백필 스크립트: `scripts/backfill_sectors.py`
+
+### F.3 VIX 통합 & 국면 강화 (100% 완료) ✅
+*개선된 국면 감지를 위한 변동성 지수*
+- [x] **VIX 데이터 수집** (2026-01-05 완료)
+  - Celery 작업: `collect_vix_data` (매일 오전 6:30 EST)
+  - Alpaca API: 일일 VIX 바 (심볼: 'VIX')
+  - 저장: PostgreSQL (이력) + Redis (최신 값, 24시간 TTL)
+- [x] **국면 감지 강화** (2026-01-05 완료)
+  - `RegimeDetector.detect_regime(vix_value=Optional[float])`
+  - VIX 임계값: >30 (극도의 공포), >20 (높은 공포)
+  - 변동성 분류에 VIX가 ATR 재정의
+  - 로깅: 국면 감지 로그에 VIX 값 포함
+- [x] **VIX 해석**
+  - VIX < 12: 낮은 변동성 (차분한 시장)
+  - VIX 12-20: 정상 변동성
+  - VIX 20-30: 높은 변동성 (높은 공포)
+  - VIX > 30: 극도의 변동성 (패닉)
+
+### F.4 고급 분석 (100% 완료) ✅
+*특성 중요도 및 포트폴리오 스트레스 테스트*
+- [x] **특성 중요도 분석** (2026-01-05 완료)
+  - Celery 작업: `analyze_feature_importance`
+  - 트리 기반 모델에서 추출 (CatBoost, LGBM, XGBoost)
+  - 앙상블 가중치를 사용한 가중 평균
+  - 출력: PNG 플롯 (상위 15개 특성) + JSON 데이터
+  - 파일: `feature_importance_{regime}.png`, `feature_importance_{regime}.json`
+- [x] **몬테카를로 시뮬레이션** (2026-01-05 완료)
+  - `MonteCarloSimulator` 클래스 (10,000회 시뮬레이션, 252일)
+  - 포트폴리오 시뮬레이션: 상관 수익률을 위한 Cholesky 분해
+  - 단일 자산 시뮬레이션: 기하 브라운 운동 (GBM)
+  - 리스크 메트릭: VaR (95%), CVaR, 손실 확률, 백분위수
+  - 사용 사례: 포트폴리오 스트레스 테스트 및 시나리오 분석
+
+**Phase F 상태: 100% 완료** ✅
+- [ ] **국면 감지 모듈**
+  - VIX, SPY 이동평균, ADX를 사용하여 시장 상태 분류
+  - 상태 출력: `BULLISH_TREND`, `BEARISH_TREND`, `HIGH_VOLATILITY`, `SIDEWAYS`
+- [ ] **국면별 모델**
+  - 각 국면에 대해 별도 가중치 또는 모델 학습
+  - **약세 모델**: 높은 공매도 가중치, 타이트한 손절
+  - **강세 모델**: 롱 전용 선호, 넓은 트레일링 스톱
+- [ ] **추론 로직**
+  - 현재 국면 감지 → 적절한 모델 로드 → 예측
+
+### F.4 AutoML & 지속적 개선
+- [x] **Walk-Forward 최적화** (2026-01-03 완료)
+  - 다중 기간 검증 구현: 3개 시간 윈도우 (90-60, 60-30, 30-0일 전)
+  - 다양한 시장 조건에서 강력한 Sharpe 추정
+  - Sharpe 전용으로 앙상블 가중치 단순화 (F1 복잡성 제거)
+- [ ] **특성 중요도 분석**
+  - 중요도 0인 특성 자동 제거하여 노이즈 감소
+- [ ] **몬테카를로 시뮬레이션**
+  - 무작위 시장 경로에 대한 전략 스트레스 테스트
+
+---
+
+## 🎯 Phase G: 실시간 15분 거래 (2026-01-04 완료)
+
+**목표**: 15분봉 및 실시간 데이터 수집으로 일중 거래 활성화
+
+### G.1 실시간 데이터 수집
+- [x] **15분 OHLCV 수집** (2026-01-04 완료)
+  - Celery 작업: `collect_15m_realtime` (장중 15분마다, 9:00-15:00 ET)
+  - Alpaca 통합: VWAP 및 trade_count 필드 추가
+  - 장중 시간 검증 (평일 체크, 9:30 AM - 4:00 PM ET)
+
+### G.2 VWAP 특성 엔지니어링
+- [x] **VWAP 거리 특성** (2026-01-04 완료)
+  - 공식: `(close - vwap) / vwap`
+  - 해석: 기관 벤치마크 비교
+  - 총 특성: 19 → 20 (vwap_distance 추가)
+
+### G.3 거래 로직 15분 전환
+- [x] **SyncTradingStrategy 15분 모드** (2026-01-04 완료)
+  - 타임프레임: '15m' (기존 '1d')
+  - 최소 바: 500 (≈5 거래일)
+  - 임계값 조정: 0.5% → 0.2% (일중 민감도)
+  - 로깅: [15m] 태그 추가
+
+### G.4 Celery Beat 스케줄
+- [x] **15분 수집 스케줄** (2026-01-04 완료)
+  - Crontab: `minute=0,15,30,45 hour=9-15 day_of_week=1-5`
+  - Worker: app.tasks.realtime_data 포함
+  - 빈도: 시간당 4회, 하루 7시간, 평일만
+
+---
+
+## 🧠 Phase H: 시장 국면 인식 (2026-01-04 부분 완료)
+
+**목표**: 시장 조건(강세, 약세, 변동성, 안정)에 반응하는 적응형 AI
+
+### H.1 국면 감지 통합
+- [x] **RegimeDetector 통합** (2026-01-04 완료)
+  - 메서드: SyncTradingStrategy의 `detect_market_regime()`
+  - 참조: SPY 15분 데이터 (90일 룩백)
+  - 메트릭: ADX > 25 (추세), ATR% > 3% (변동성), SMA50 (방향)
+  - 출력: 4개 국면 (BULL_TRENDING, BEAR_TRENDING, SIDEWAYS_VOLATILE, SIDEWAYS_CALM)
+
+### H.2 국면 인식 예측
+- [x] **PredictorService 다중 모델 지원** (2026-01-04 완료)
+  - 모델 로딩: 4개 국면별 pkl 파일 또는 일반 폴백
+  - 메서드: `predict_next(features, regime=MarketRegime.SIDEWAYS_CALM)`
+  - 폴백: 국면 모델 누락 시 일반 모델
+
+### H.3 국면별 모델 학습
+- [x] **학습 파이프라인 국면 분류** (2026-01-04 완료)
+  - 역사적 데이터를 국면별로 분류 (SPY 기반 감지)
+  - 4개 국면 데이터셋으로 분할 (각 최소 1000 샘플)
+  - 4개 앙상블 모델 학습: `ensemble_model_{regime}.pkl`
+  - 국면별 Walk-Forward 검증
+  - 구현: training.py의 _train_regime_specific_models()
+
+---
+
+## 🛡️ Phase I: 고급 리스크 & 포지션 방어 (2026-01-05 완료)
+
+**목표**: 과도한 거래, 조기 청산, 빠른 재거래로부터 보호
+
+### I.1 거래 방어 메커니즘 (2026-01-04 완료)
+**해결된 중대 취약점:**
+- ✅ **최소 보유 기간**: 60분 (4 바 @ 15분)
+  - 빠른 포지션 전환 방지 (15분 내 매수 → 매도)
+  - 예외: 손절 신호 우선
+- ✅ **최소 수익 임계값**: 1.5% (거래 비용 5배 마진)
+  - 최소 수익으로 조기 청산 방지
+  - 120분 후 강제 청산 허용
+- ✅ **쿨다운 기간**: 청산 후 60분
+  - 즉시 재거래 방지 (휩쏘 보호)
+  - 로그: "COOLDOWN: X분 남음"
+
+**구현:**
+- 데이터베이스: `position_tracking` 테이블 (Alembic 마이그레이션 `002_position_tracking.py`)
+- RiskManager: `can_enter_position()`, `can_exit_position()`, `record_position_exit()`
+- Repository: `record_position_entry()`, `get_active_position()`, `update_position_exit()`
+- TradingStrategy: BUY/SELL 주문 전 방어 체크
+
+**영향:**
+- 거래 수수료 비율: 0.5% → 0.1% (예상)
+- 휩쏘 거래: 20-30% → <5%
+- 예상 ROI 개선: +10-15% 연간
+
+### I.2 다중 포지션 시스템 (2026-01-05 완료)
+**기능:**
+- ✅ **동시 다중 심볼 포지션**
+  - AAPL + MSFT + GOOGL + NVDA + TSLA 동시 보유 (최대 5개)
+  - 상관계수 매트릭스 기반 포트폴리오 분산
+  - 심볼 선택: 활성 포지션과 낮은 상관관계 (<0.7)
+- ✅ **현대 포트폴리오 이론 (MPT)**
+  - scipy.optimize를 통한 Sharpe 비율 최대화
+  - 제약: 심볼당 최대 30% 할당, 가중치 합 = 1.0
+  - 자동 업그레이드: 백테스트 데이터 → 실거래 데이터 (50+ 거래 존재 시)
+- ✅ **켈리 기준 포지션 크기 결정**
+  - 공식: `f* = (bp - q) / b` (25% 안전 계수)
+  - 승률 및 P/L 비율 기반 심볼별 동적 계산
+  - 실거래 데이터 통합: 심볼당 10+ 거래 후 자동 전환
+- ✅ **포트폴리오 레벨 VaR**
+  - 일일 위험 가치 계산 (95% 신뢰도, 14일 윈도우)
+  - 역사적 시뮬레이션 방법 (백분위수 기반)
+  - 보수적 폴백: 데이터 부족 시 -3% 일일 리스크
+- ✅ **일일 리밸런싱**
+  - 스케줄: 3:45 PM ET (장 마감 15분 전)
+  - 트리거: 가중치 드리프트 > 5%일 때만
+  - 최소 거래 금액: $100 (미세 거래 방지)
+- ✅ **자동 파라미터 업데이트**
+  - 일일 00:00 ET: 상관계수 매트릭스, VaR, 켈리 크기
+  - 롤링 14일 윈도우 (자동 갱신)
+  - Redis 캐싱: 24시간 TTL
+
+**구현:**
+- PortfolioOptimizer: 상관계수, VaR, 켈리, MPT 최적화
+- PortfolioRepository: P&L 집계, 거래 이력, 포지션 쿼리
+- PortfolioRebalancer: 가중치 계산, 드리프트 감지, 주문 실행
+- TradingStrategy.process_portfolio(): 다중 심볼 배치 처리
+- Celery 작업: update_portfolio_parameters (00:00), rebalance_portfolio (15:45)
+
+**영향:**
+- 분산: 1 → 5 동시 포지션
+- 리스크 감소: 상관계수 기반 선택 (<0.7)
+- 자본 효율성: 켈리 최적화 포지션 크기 결정
+- Sharpe 최대화: MPT 가중치 최적화
+
+### I.3 외부 데이터 통합 (계획: Phase J - 미래)
+**현재 로드맵 범위 밖:**
+- Gemini API를 통한 뉴스 감성
+- Reddit/Twitter 소셜 감성
+- FRED 경제 지표
+- 필요: 새 마이크로서비스 아키텍처, API 구독
+
+---
+
+## 🛠️ 기술 부채 & 정리
+- [ ] **레거시 코드 제거**: 미사용 파일 확인 (예: 이전 `services/backtester.py`, 모의 전략)
+- [ ] **단위 테스트**: `features.py` 및 `predictor.py`에 대한 커버리지 개선
+- [ ] **문서화**: 새 Ops 엔드포인트로 API 문서(Swagger) 업데이트
