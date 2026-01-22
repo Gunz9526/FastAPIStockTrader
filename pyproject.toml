@@ -5,7 +5,7 @@ description = "High-Frequency Stock Trading Platform using FastAPI and Timescale
 authors = [
     { name = "Antigravity Agent", email = "agent@google.com" }
 ]
-requires-python = ">=3.14"
+requires-python = "==3.14.*"
 dependencies = [
     "fastapi>=0.109.0",
     "uvicorn[standard]>=0.27.0",

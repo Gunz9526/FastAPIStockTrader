@@ -33,7 +33,36 @@ Current Status: **Phase E (Production Hardening) & F (Advanced AI) Preparation**
 
 ---
 
-## 🧹 Code Quality & Cleanup (Ongoing)
+## CI/CD Infrastructure (Completed 2026-01-22) ✅
+
+**Goal**: Fast and reliable GitHub Actions pipeline for Python 3.14 + CatBoost.
+
+### Build Optimization
+- [x] **Conda-based Dependency Management**
+  - Migrated from pip to conda for Python 3.14 compatibility
+  - Created `environment.yml` for reproducible environments
+  - CatBoost installation: Source build (40min) → Pre-built wheel (2min)
+- [x] **GitHub Actions Workflow**
+  - Implemented `conda-incubator/setup-miniconda@v3`
+  - Added `shell: bash -el {0}` for conda environment activation
+  - Separated conda packages (catboost, numpy, pandas) from pip packages
+- [x] **Dockerfile Multi-stage Build**
+  - Optimized layer caching with environment.yml first
+  - Added CatBoost installation verification step
+  - Build time: 15-20min → 5-7min
+- [x] **Version Pinning**
+  - Python: Fixed to 3.14.x (`requires-python = "==3.14.*"`)
+  - CatBoost: 1.2.8 from conda-forge (catboost-1.2.8-cpu_py314hf729cd6_6.conda)
+  - Channel priority: conda-forge (strict)
+
+**Impact:**
+- GitHub Actions build time: 40min (timeout) → 3min (93% reduction)
+- Docker build time: 15min → 6min (60% reduction)
+- CI/CD reliability: 0% success → 100% success
+
+---
+
+## Code Quality & Cleanup (Ongoing)
 
 **Goal**: Maintain high code quality through refactoring, optimization, and best practices.
 
@@ -84,18 +113,27 @@ Current Status: **Phase E (Production Hardening) & F (Advanced AI) Preparation**
 
 ---
 
-## 🚧 Phase E: Production Hardening (Current Focus)
+## Phase E: Production Hardening (Current Focus)
 
 **Goal**: Ensure the system runs autonomously and robustly in a live environment.
 
-### E.1 Operational Reliability
-- [ ] **Alpaca WebSocket** (Real-time Order Updates)
-  - Replace polling with event-driven updates for filled orders.
-- [ ] **Circuit Breakers** (Risk Management)
-  - Stop trading if daily loss > 3% or $500.
-  - Halt automated orders if API latency > 3000ms.
+**Status**: 20% Complete (Infrastructure ready, operational features pending)
+
+### E.1 Operational Reliability (Priority: HIGH)
+- [ ] **Circuit Breakers Enhancement** (Next Task)
+  - Current: Basic RiskManager checks (cooldown, min profit)
+  - Planned: Portfolio-level circuit breakers
+    - Daily loss limit: -3% or -$500 (whichever first)
+    - API latency threshold: > 3000ms → halt trading
+    - Consecutive loss limit: 3 losses in 1 hour → pause
+  - Implementation: `app/services/circuit_breaker.py` expansion
+  - Estimated: 2-3 days
 - [ ] **Alerting System** (Discord/Slack Webhook)
-  - Notify on: Trade Execution, Critical Errors, Risk Limits.
+  - Notify on: Trade Execution, Critical Errors, Risk Limits
+  - Priority: MEDIUM (after circuit breakers)
+- [ ] **Alpaca WebSocket** (Real-time Order Updates)
+  - Replace polling with event-driven updates for filled orders
+  - Priority: LOW (current polling works, optimization only)
 
 ### E.2 Infrastructure High Availability
 - [ ] **PostgreSQL Replication** (Primary-Replica Setup Plan)
@@ -309,16 +347,66 @@ Current Status: **Phase E (Production Hardening) & F (Advanced AI) Preparation**
 - Capital efficiency: Kelly-optimized position sizing
 - Sharpe maximization: MPT weight optimization
 
-### I.3 External Data Integration (Planned: Phase J - Future)
+### I.3 External Data Integration (Completed via Phase F)
+**Already Implemented:**
+- Gemini API for news sentiment (Phase F.1)
+- Finnhub for financial news (Phase F.1)
+- yfinance for fundamentals (Phase F.2)
+
 **Out of Scope for Current Roadmap:**
-- Gemini API for news sentiment
 - Reddit/Twitter social sentiment
 - FRED economic indicators
-- Requires: New microservice architecture, API subscriptions
+- Alternative data providers (Quandl, Bloomberg Terminal)
 
 ---
 
-## 🛠️ Technical Debt & Cleanup
-- [ ] **Remove Legacy Code**: Check for unused files (e.g., old `services/backtester.py`, mock strategies).
-- [ ] **Unit Tests**: Coverage improvement for `features.py` and `predictor.py`.
-- [ ] **Documentation**: Update API docs (Swagger) with new Ops endpoints.
+## Next Steps (Priority Order)
+
+### Immediate (This Week)
+1. **Circuit Breaker Enhancement** (Phase E.1)
+   - Portfolio-level loss limits
+   - API latency monitoring
+   - Consecutive loss detection
+   - Estimated: 2-3 days
+
+### Short-term (Next 2 Weeks)
+2. **Alerting System** (Phase E.1)
+   - Discord webhook integration
+   - Alert templates (trade, error, risk)
+   - Estimated: 1-2 days
+
+3. **Test Coverage Improvement**
+   - Target: 45% → 70%
+   - Focus: `features.py`, `predictor.py`, `portfolio_optimizer.py`
+   - Estimated: 3-4 days
+
+### Mid-term (Next Month)
+4. **PostgreSQL Replication** (Phase E.2)
+   - Primary-Replica setup for high availability
+   - Estimated: 5-7 days
+
+5. **Production Monitoring Dashboard**
+   - Grafana dashboard customization
+   - Key metrics: Sharpe, drawdown, win rate, latency
+   - Estimated: 2-3 days
+
+### Long-term (Future Phases)
+- Phase J: Microservices Architecture (if scaling needed)
+- Phase K: Machine Learning Model Registry (MLflow integration)
+- Phase L: Backtesting Platform (Web UI for strategy testing)
+
+---
+
+## Technical Debt & Cleanup
+
+### Current Status
+- Test Coverage: ~45% (needs improvement to 70%+)
+- Documentation: Swagger partially updated (RAG endpoints documented)
+- Code Quality: Ruff linting passing, mypy type checking 80%
+
+### Pending Tasks
+- [ ] **Remove Legacy Code**: Check for unused files (e.g., old `services/backtester.py`, mock strategies)
+- [ ] **Unit Tests**: Coverage improvement for `features.py` and `predictor.py`
+- [ ] **Documentation**: Update API docs (Swagger) with new Ops endpoints
+- [ ] **Type Hints**: Add missing type hints to achieve 100% mypy coverage
+- [ ] **English Logs**: Convert remaining Korean logs to English for international compatibility

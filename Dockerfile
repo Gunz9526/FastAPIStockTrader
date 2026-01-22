@@ -11,19 +11,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Create conda environment with Python 3.14
-RUN conda create -n trading python=3.14 -y && \
+# Copy environment file first (better layer caching)
+COPY environment.yml ./
+
+# Create conda environment from environment.yml (includes Python 3.14 + CatBoost)
+RUN conda env create -f environment.yml && \
     conda clean -afy
 
-# Activate environment and install CatBoost via conda-forge
-RUN /bin/bash -c "source activate trading && \
-    conda install -c conda-forge catboost=1.2.8 -y && \
-    conda clean -afy"
-
-# Install other Python packages via pip
-COPY requirements.txt ./
-RUN /bin/bash -c "source activate trading && \
-    pip install --no-cache-dir -r requirements.txt"
+# Verify CatBoost installation
+RUN /bin/bash -c "source activate trading && python -c 'import catboost; print(catboost.__version__)'"
 
 # ===== Runtime Stage =====
 FROM continuumio/miniconda3:latest

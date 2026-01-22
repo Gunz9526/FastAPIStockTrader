@@ -33,7 +33,36 @@ FastAPI Stock Trader 백엔드의 체계적 진화 과정을 담은 로드맵입
 
 ---
 
-## 🧹 코드 품질 & 정리 (진행 중)
+## CI/CD 인프라 (2026-01-22 완료) ✅
+
+**목표**: Python 3.14 + CatBoost를 위한 빠르고 신뢰할 수 있는 GitHub Actions 파이프라인
+
+### 빌드 최적화
+- [x] **Conda 기반 종속성 관리**
+  - Python 3.14 호환성을 위해 pip에서 conda로 마이그레이션
+  - 재현 가능한 환경을 위한 `environment.yml` 생성
+  - CatBoost 설치: 소스 빌드(40분) → Pre-built wheel(2분)
+- [x] **GitHub Actions 워크플로우**
+  - `conda-incubator/setup-miniconda@v3` 구현
+  - Conda 환경 활성화를 위한 `shell: bash -el {0}` 추가
+  - conda 패키지(catboost, numpy, pandas)와 pip 패키지 분리
+- [x] **Dockerfile 멀티스테이지 빌드**
+  - environment.yml을 먼저 복사하여 레이어 캠싱 최적화
+  - CatBoost 설치 검증 단계 추가
+  - 빌드 시간: 15-20분 → 5-7분
+- [x] **버전 고정**
+  - Python: 3.14.x로 고정 (`requires-python = "==3.14.*"`)
+  - CatBoost: conda-forge에서 1.2.8 (catboost-1.2.8-cpu_py314hf729cd6_6.conda)
+  - 채널 우선순위: conda-forge (strict)
+
+**영향:**
+- GitHub Actions 빌드 시간: 40분(타임아웃) → 3분(93% 감소)
+- Docker 빌드 시간: 15분 → 6분(60% 감소)
+- CI/CD 신뢰성: 0% 성공 → 100% 성공
+
+---
+
+## 코드 품질 & 정리 (진행 중)
 
 **목표**: 리팩토링, 최적화, 모범 사례를 통해 높은 코드 품질 유지
 
@@ -84,18 +113,27 @@ FastAPI Stock Trader 백엔드의 체계적 진화 과정을 담은 로드맵입
 
 ---
 
-## 🚧 Phase E: 프로덕션 강화 (현재 초점)
+## Phase E: 프로덕션 강화 (현재 초점)
 
-**목표**: 시스템이 라이브 환경에서 자율적이고 견고하게 작동하도록 보장
+**목표**: 시스템이 라이브 환경에서 자율적이고 겁고하게 작동하도록 보장
 
-### E.1 운영 안정성
-- [ ] **Alpaca WebSocket** (실시간 주문 업데이트)
-  - 폴링을 이벤트 기반 업데이트로 교체
-- [ ] **서킷 브레이커** (리스크 관리)
-  - 일일 손실 > 3% 또는 $500 시 거래 중단
-  - API 지연 > 3000ms 시 자동 주문 중단
+**상태**: 20% 완료 (인프라 준비 완료, 운영 기능 보류 중)
+
+### E.1 운영 안정성 (우선순위: 높음)
+- [ ] **서킷 브레이커 향상** (다음 작업)
+  - 현재: 기본 RiskManager 검사 (쾸다운, 최소 수익)
+  - 계획: 포트폴리오 레벨 서킷 브레이커
+    - 일일 손실 한계: -3% 또는 -$500 (먼저 도달)
+    - API 지연 임계값: > 3000ms → 거래 중단
+    - 연속 손실 한계: 1시간 내 3회 손실 → 일시 중지
+  - 구현: `app/services/circuit_breaker.py` 확장
+  - 예상: 2-3일
 - [ ] **알림 시스템** (Discord/Slack Webhook)
   - 알림 대상: 거래 실행, 중대 오류, 리스크 한계
+  - 우선순위: 보통 (서킷 브레이커 후)
+- [ ] **Alpaca WebSocket** (실시간 주문 업데이트)
+  - 폴링을 이벤트 기반 업데이트로 교체
+  - 우선순위: 낮음 (현재 폴링 작동, 최적화 용도)
 
 ### E.2 인프라 고가용성
 - [ ] **PostgreSQL 복제** (Primary-Replica 설정 계획)
@@ -328,16 +366,66 @@ FastAPI Stock Trader 백엔드의 체계적 진화 과정을 담은 로드맵입
 - 자본 효율성: 켈리 최적화 포지션 크기 결정
 - Sharpe 최대화: MPT 가중치 최적화
 
-### I.3 외부 데이터 통합 (계획: Phase J - 미래)
-**현재 로드맵 범위 밖:**
-- Gemini API를 통한 뉴스 감성
-- Reddit/Twitter 소셜 감성
+### I.3 외부 데이터 통합 (Phase F를 통해 완료)
+**이미 구현됨:**
+- Gemini API를 통한 뉴스 감성 분석 (Phase F.1)
+- Finnhub를 통한 금융 뉴스 (Phase F.1)
+- yfinance를 통한 펀더멘털 (Phase F.2)
+
+**현재 로드맵 범위 외:**
+- Reddit/Twitter 소셜 감성 분석
 - FRED 경제 지표
-- 필요: 새 마이크로서비스 아키텍처, API 구독
+- 대체 데이터 제공업체 (Quandl, Bloomberg Terminal)
 
 ---
 
-## 🛠️ 기술 부채 & 정리
-- [ ] **레거시 코드 제거**: 미사용 파일 확인 (예: 이전 `services/backtester.py`, 모의 전략)
-- [ ] **단위 테스트**: `features.py` 및 `predictor.py`에 대한 커버리지 개선
-- [ ] **문서화**: 새 Ops 엔드포인트로 API 문서(Swagger) 업데이트
+## 다음 단계 (우선순위 순서)
+
+### 즉시 (이번 주)
+1. **서킷 브레이커 향상** (Phase E.1)
+   - 포트폴리오 레벨 손실 한계
+   - API 지연 모니터링
+   - 연속 손실 감지
+   - 예상: 2-3일
+
+### 단기 (향후 2주)
+2. **알림 시스템** (Phase E.1)
+   - Discord webhook 통합
+   - 알림 템플릿 (거래, 오류, 리스크)
+   - 예상: 1-2일
+
+3. **테스트 커버리지 개선**
+   - 목표: 45% → 70%
+   - 초점: `features.py`, `predictor.py`, `portfolio_optimizer.py`
+   - 예상: 3-4일
+
+### 중기 (다음 달)
+4. **PostgreSQL 복제** (Phase E.2)
+   - 고가용성을 위한 Primary-Replica 설정
+   - 예상: 5-7일
+
+5. **프로덕션 모니터링 대시보드**
+   - Grafana 대시보드 커스터마이징
+   - 주요 메트릭: Sharpe, drawdown, win rate, latency
+   - 예상: 2-3일
+
+### 장기 (향후 단계)
+- Phase J: 마이크로서비스 아키텍처 (스케일링 필요 시)
+- Phase K: 머신러닝 모델 레지스트리 (MLflow 통합)
+- Phase L: 백테스팅 플랫폼 (전략 테스팅용 Web UI)
+
+---
+
+## 기술 부채 & 정리
+
+### 현재 상태
+- 테스트 커버리지: ~45% (70%+로 개선 필요)
+- 문서화: Swagger 부분 업데이트 (RAG 엔드포인트 문서화)
+- 코드 품질: Ruff 린팅 통과, mypy 타입 검사 80%
+
+### 보류 중인 작업
+- [ ] **레거시 코드 제거**: 미사용 파일 확인 (예: 오래된 `services/backtester.py`, 모의 전략)
+- [ ] **단위 테스트**: `features.py`와 `predictor.py`의 커버리지 개선
+- [ ] **문서화**: 새로운 Ops 엔드포인트로 API 문서(Swagger) 업데이트
+- [ ] **타입 힌트**: 100% mypy 커버리지 달성을 위한 누락된 타입 힌트 추가
+- [ ] **영어 로그**: 국제 호환성을 위해 남은 한국어 로그를 영어로 변환

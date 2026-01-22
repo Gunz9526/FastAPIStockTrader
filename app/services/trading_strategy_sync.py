@@ -126,7 +126,7 @@ class SyncTradingStrategy:
             features_df = self.feature_engineer.create_features(df)
             
             if features_df.empty:
-                logger.warning("Failed to generate SPY features for regime detection")
+                logger.warning("SPY 특성 생성 실패: 레짐 감지 불가")
                 return
             
             vix_value = None
@@ -755,7 +755,7 @@ class SyncTradingStrategy:
             )
             order = self.api.submit_order(order_data=order_data)
             
-            logger.info("주문 실행: SELL %s x%d @ $%.2f (ID: %s, 이유: %s)", 
+            logger.info("주문 실행: SELL %s x%d @ $%.2f (ID: %s, 이유: %s)",
                        symbol, qty, current_price, order.id, reason)
             
             # DB 업데이트

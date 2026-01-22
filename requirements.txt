@@ -14,7 +14,6 @@ requests>=2.31.0
 pandas>=2.2.0
 numpy>=1.26.0
 scikit-learn>=1.7.1
-catboost>=1.2.2
 lightgbm>=4.3.0
 xgboost>=2.0.3
 optuna>=3.5.0

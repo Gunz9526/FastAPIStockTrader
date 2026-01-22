@@ -1,0 +1,44 @@
+name: trading
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.14
+  # ML Libraries (from conda-forge for Python 3.14 support)
+  - catboost=1.2.8
+  - lightgbm>=4.3.0
+  - xgboost>=2.0.3
+  - scikit-learn>=1.7.1
+  - numpy>=1.26.0
+  - pandas>=2.2.0
+  - scipy>=1.11.0
+  - joblib>=1.3.2
+  - optuna>=3.5.0
+  - matplotlib>=3.8.0
+  # System libraries for TA-Lib
+  - ta-lib>=0.6.0
+  # Database drivers
+  - psycopg2>=2.9.9
+  # Pip dependencies (not available in conda or better from PyPI)
+  - pip
+  - pip:
+      - fastapi>=0.109.0
+      - uvicorn[standard]>=0.27.0
+      - sqlalchemy>=2.0.25
+      - alembic>=1.13.1
+      - asyncpg>=0.29.0
+      - pydantic>=2.6.0
+      - pydantic-settings>=2.1.0
+      - redis>=5.0.1
+      - celery>=5.3.6
+      - python-json-logger>=2.0.7
+      - httpx>=0.26.0
+      - requests>=2.31.0
+      - alpaca-py>=0.30.0
+      - prometheus-fastapi-instrumentator>=7.0.0
+      - yfinance>=0.2.0
+      - slowapi>=0.1.9
+      - backtrader==1.9.78.123
+      - google-genai>=1.56.0
+      - finnhub-python>=2.4.26
+      - flower>=2.0.1
