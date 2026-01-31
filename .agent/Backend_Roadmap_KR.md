@@ -326,6 +326,49 @@ FastAPI Stock Trader 백엔드의 체계적 진화 과정을 담은 로드맵입
   - 국면별 Walk-Forward 검증
   - 구현: training.py의 _train_regime_specific_models()
 
+### H.4 Bull 레짐 성능 강화 (2026-01-23 완료) ✅
+*저조한 bull_trending 모델 성능 개선 (정확도 49%, Sharpe -0.22)*
+- [x] **Feature Importance Analyzer** (2026-01-23 완료)
+  - 새 유틸리티: `app/ml/feature_analyzer.py` (FeatureImportanceAnalyzer 클래스)
+  - CatBoost, LightGBM, XGBoost 모델에서 중요도 추출
+  - 앙상블 구성에 따른 가중 평균
+  - JSON 내보내기 및 PNG 시각화 지원
+  - 사용법: `FeatureImportanceAnalyzer.from_models(models).get_report()`
+- [x] **강세장 전용 모멘텀 특성** (2026-01-23 완료)
+  - 6개 신규 특성: momentum_5, momentum_10, rsi_momentum, trend_strength, price_position, breakout_flag
+  - 특성 개수: 21 → 27개 기본 특성
+  - 근거: 강세장은 평균회귀와 다른 기술 지표 필요
+  - 구현: `app/ml/features.py::_add_momentum_features()`
+- [x] **국면별 거래 임계값** (2026-01-23 완료)
+  - ADR: ADR-001-Regime-Specific-Trading-Thresholds.md
+  - 설정: `app/core/config.py`의 `REGIME_TRADING_CONFIG`
+  - 임계값:
+    - bull_trending: 0.4% 매수, -0.1% 매도, 30% position_scale (보수적)
+    - bear_trending: 0.2% 매수, -0.2% 매도, 70% position_scale
+    - sideways_volatile: 0.2% 매수, -0.2% 매도, 50% position_scale, 비활성
+    - sideways_calm: 0.2% 매수, -0.2% 매도, 100% position_scale (최적)
+  - 구현: `_execute_trade_logic()`에서 동적으로 국면 설정 사용
+- [x] **Walk-Forward OOS 검증 강화** (2026-01-23 완료)
+  - 강화된 함수: training.py의 `_walk_forward_validation_enhanced()`
+  - TimeSeriesSplit 기반 검증 (기본 5 splits)
+  - 과적합 감지: `OOS/IS Sharpe 비율 < 0.3` 또는 `IS > 5이고 OOS < 1`
+  - 모델 신뢰도: OOS Sharpe 성능 기반 0.1-1.0
+  - 폴드별 메트릭 로깅: IS vs OOS 비교
+  - 영향: 의심스러운 모델 조기 감지 (bear_trending 10.47 Sharpe)
+
+**모델 성능 분석 (개선 전):**
+| 국면 | 정확도 | Sharpe | 상태 |
+|--------|----------|--------|--------|
+| bull_trending | 49.0% | -0.22 | ❌ 심각 |
+| bear_trending | 52.8% | 10.47 | ⚠️ 과적합 의심 |
+| sideways_calm | 53.2% | 6.53 | ✅ 양호 |
+| sideways_volatile | 52.2% | N/A | ⚠️ 비활성 |
+
+**예상 효과:**
+- bull_trending: 보수적 임계값으로 약한 모델의 손실 방지
+- bear_trending: OOS 검증으로 배포 전 과적합 감지
+- 전체: Feature importance 분석으로 데이터 기반 모델 개선 가능
+
 ---
 
 ## 🛡️ Phase I: 고급 리스크 & 포지션 방어 (2026-01-05 완료)

@@ -1,13 +1,10 @@
 from logging.config import fileConfig
 
-from sqlalchemy import engine_from_config
-from sqlalchemy import pool
+from sqlalchemy import engine_from_config, pool
 
 from alembic import context
-
-# Import your models' Base for autogenerate support
-from app.domain.models.stock import Base
 from app.core.config import settings
+from app.domain.models.stock import Base
 
 # this is the Alembic Config object
 config = context.config
@@ -16,7 +13,9 @@ config = context.config
 # Convert asyncpg to psycopg2 for Alembic (sync driver required)
 database_url = str(settings.DATABASE_URL)
 if database_url.startswith("postgresql+asyncpg://"):
-    database_url = database_url.replace("postgresql+asyncpg://", "postgresql+psycopg2://")
+    database_url = database_url.replace(
+        "postgresql+asyncpg://", "postgresql+psycopg2://"
+    )
 config.set_main_option("sqlalchemy.url", database_url)
 
 # Interpret the config file for Python logging
@@ -25,6 +24,7 @@ if config.config_file_name is not None:
 
 # Add your model's MetaData object here for 'autogenerate' support
 target_metadata = Base.metadata
+
 
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode."""
@@ -45,7 +45,7 @@ def run_migrations_online() -> None:
     # Get configuration section but override with sync URL
     configuration = config.get_section(config.config_ini_section, {})
     configuration["sqlalchemy.url"] = database_url
-    
+
     connectable = engine_from_config(
         configuration,
         prefix="sqlalchemy.",
@@ -54,8 +54,8 @@ def run_migrations_online() -> None:
 
     with connectable.connect() as connection:
         context.configure(
-            connection=connection, 
-            target_metadata=target_metadata
+            connection=connection,
+            target_metadata=target_metadata,
         )
 
         with context.begin_transaction():

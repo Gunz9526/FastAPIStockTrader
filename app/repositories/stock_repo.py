@@ -1,9 +1,11 @@
 from datetime import datetime
-from typing import List, Optional
-from sqlalchemy import select, insert, update
+
+from sqlalchemy import insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.domain.models.stock import StockTicker, StockOHLCV
-from app.domain.schemas.stock import StockTickerCreate, StockOHLCVCreate
+
+from app.domain.models.stock import StockOHLCV, StockTicker
+from app.domain.schemas.stock import StockOHLCVCreate, StockTickerCreate
+
 
 class StockRepository:
     def __init__(self, session: AsyncSession):
@@ -16,47 +18,47 @@ class StockRepository:
         await self.session.refresh(db_obj)
         return db_obj
 
-    async def get_ticker(self, symbol: str) -> Optional[StockTicker]:
+    async def get_ticker(self, symbol: str) -> StockTicker | None:
         result = await self.session.execute(
             select(StockTicker).where(StockTicker.symbol == symbol)
         )
         return result.scalars().first()
-    
-    async def get_all_tickers(self) -> List[StockTicker]:
+
+    async def get_all_tickers(self) -> list[StockTicker]:
         result = await self.session.execute(select(StockTicker))
         return list(result.scalars().all())
 
-    async def create_ohlcv_bulk(self, ohlcv_list: List[StockOHLCVCreate]) -> int:
+    async def create_ohlcv_bulk(self, ohlcv_list: list[StockOHLCVCreate]) -> int:
         """Bulk insert OHLCV data. Returns count of inserted rows."""
         if not ohlcv_list:
             return 0
-        
+
         data = [item.model_dump() for item in ohlcv_list]
         stmt = insert(StockOHLCV).values(data)
-        # On conflict do nothing or update? For now just insert. 
+        # On conflict do nothing or update? For now just insert.
         # Ideally should handle upsert for TimescaleDB.
-        
+
         result = await self.session.execute(stmt)
         await self.session.commit()
         return result.rowcount
 
-    async def get_ohlcv(self, symbol: str, start_date: datetime, end_date: datetime) -> List[StockOHLCV]:
+    async def get_ohlcv(self, symbol: str, start_date: datetime, end_date: datetime) -> list[StockOHLCV]:
         query = select(StockOHLCV).where(
             StockOHLCV.symbol == symbol,
             StockOHLCV.date_time >= start_date,
             StockOHLCV.date_time <= end_date
         ).order_by(StockOHLCV.date_time.asc())
-        
+
         result = await self.session.execute(query)
         return list(result.scalars().all())
-    
-    async def get_active_symbols(self) -> List[str]:
+
+    async def get_active_symbols(self) -> list[str]:
         """Get list of active ticker symbols."""
         result = await self.session.execute(
             select(StockTicker.symbol).where(StockTicker.is_active == True)
         )
         return [row[0] for row in result.all()]
-    
-    async def get_ohlcv_range(self, symbol: str, start_date: datetime, end_date: datetime) -> List[StockOHLCV]:
+
+    async def get_ohlcv_range(self, symbol: str, start_date: datetime, end_date: datetime) -> list[StockOHLCV]:
         """Alias for get_ohlcv for consistency."""
         return await self.get_ohlcv(symbol, start_date, end_date)

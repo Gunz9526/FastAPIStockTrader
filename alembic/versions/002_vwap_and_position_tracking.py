@@ -5,9 +5,9 @@ Revises: 001_timescaledb_setup
 Create Date: 2026-01-05
 
 """
-from alembic import op
 import sqlalchemy as sa
 
+from alembic import op
 
 revision = '002_vwap_tracking'
 down_revision = '001_timescaledb_setup'
@@ -19,7 +19,7 @@ def upgrade():
     # 1. Add VWAP and trade_count to stock_ohlcv
     op.add_column('stock_ohlcv', sa.Column('vwap', sa.Float(), nullable=True))
     op.add_column('stock_ohlcv', sa.Column('trade_count', sa.Integer(), nullable=True))
-    
+
     # 2. Create position_tracking table
     op.create_table(
         'position_tracking',
@@ -34,7 +34,7 @@ def upgrade():
         sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.func.now()),
         sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.func.now(), onupdate=sa.func.now())
     )
-    
+
     # Indexes for position_tracking
     op.create_index('ix_position_tracking_symbol', 'position_tracking', ['symbol'])
     op.create_index('ix_position_tracking_active', 'position_tracking', ['symbol', 'exit_time'])
@@ -49,7 +49,7 @@ def downgrade():
     op.drop_index('ix_position_tracking_active')
     op.drop_index('ix_position_tracking_symbol')
     op.drop_table('position_tracking')
-    
+
     # Drop VWAP columns
     op.drop_column('stock_ohlcv', 'trade_count')
     op.drop_column('stock_ohlcv', 'vwap')

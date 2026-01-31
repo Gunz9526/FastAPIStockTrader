@@ -1,7 +1,8 @@
-import pytest
 import pandas as pd
+
 from app.ml.features import FeatureEngineer
 from app.services.risk_manager import RiskManager
+
 
 def test_risk_manager():
     rm = RiskManager(
@@ -9,7 +10,7 @@ def test_risk_manager():
         stop_loss_atr_multiplier=2.0,
         take_profit_atr_multiplier=3.0
     )
-    
+
     # 1. Normal Position Sizing
     # Balance 100,000 -> Max Pos 10% = 10,000. Price 100 -> Qty 100.
     allowed, qty = rm.calculate_position_size("AAPL", 100.0, 100000.0)
@@ -38,15 +39,15 @@ def test_feature_engineer():
         'volume': [1000] * 100
     }
     df = pd.DataFrame(data)
-    
+
     # Run features
     fe = FeatureEngineer()
     df_new = fe.add_technical_indicators(df)
-    
+
     # Check columns exist
     expected_cols = ['rsi', 'macd', 'bb_upper', 'sma_20']
     for col in expected_cols:
         assert col in df_new.columns
-    
+
     # Check no NaNs
     assert not df_new.isnull().values.any()

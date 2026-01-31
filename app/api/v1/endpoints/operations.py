@@ -1,21 +1,12 @@
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
-from pydantic import BaseModel
-from typing import Dict, Any
-from datetime import datetime, timedelta
 import logging
-import pandas as pd
 
-from app.core.database import get_async_session
-from app.core.security import get_api_key
+from fastapi import APIRouter, BackgroundTasks
+from pydantic import BaseModel
+
 from app.tasks.data_tasks import collect_fundamentals
-from app.tasks.training import train_models, tune_models
 from app.tasks.market_analysis import analyze_market
 from app.tasks.trading import execute_market_scan
-from app.ml.predictor import PredictorService
-from app.ml.features import FeatureEngineer
-from app.services.regime import RegimeDetector
-from app.repositories.stock_repo import StockRepository
+from app.tasks.training import train_models, tune_models
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -161,7 +152,7 @@ async def get_circuit_breaker_status():
         - avg_latency_ms: 평균 API 레이턴시
     """
     from app.services.circuit_breaker import get_circuit_breaker
-    
+
     breaker = get_circuit_breaker()
     return breaker.get_status()
 
@@ -179,7 +170,7 @@ async def open_circuit_breaker(reason: str = "수동 차단"):
         - 비정상 시장 상황 감지 시
     """
     from app.services.circuit_breaker import get_circuit_breaker
-    
+
     breaker = get_circuit_breaker()
     breaker.force_open(reason)
     return {"status": "opened", "reason": reason}
@@ -195,7 +186,7 @@ async def close_circuit_breaker():
         - 시장 상황이 정상인지 확인 필요
     """
     from app.services.circuit_breaker import get_circuit_breaker
-    
+
     breaker = get_circuit_breaker()
     breaker.force_close()
     return {"status": "closed", "message": "Trading resumed"}

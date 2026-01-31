@@ -29,15 +29,17 @@ ON position_tracking (symbol, entry_time)
 WHERE exit_time IS NULL;
 ```
 """
-from typing import Sequence, Union
-from alembic import op
+from collections.abc import Sequence
+
 import sqlalchemy as sa
+
+from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = '003_add_partial_indexes'
-down_revision: Union[str, None] = '002_vwap_tracking'
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | None = '002_vwap_tracking'
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
@@ -55,7 +57,7 @@ def upgrade() -> None:
         unique=False,
         postgresql_where=sa.text('exit_time IS NULL'),
     )
-    
+
     # Partial index on positions table for open positions
     # Optimizes: SELECT * FROM positions WHERE status = 'OPEN'
     op.create_index(

@@ -307,6 +307,49 @@ Current Status: **Phase E (Production Hardening) & F (Advanced AI) Preparation**
   - Walk-Forward validation per regime
   - Implementation: _train_regime_specific_models() in training.py
 
+### H.4 Bull Regime Enhancement (Completed 2026-01-23) ✅
+*Critical fix for underperforming bull_trending model (49% accuracy, -0.22 Sharpe)*
+- [x] **Feature Importance Analyzer** (Completed 2026-01-23)
+  - New utility: `app/ml/feature_analyzer.py` (FeatureImportanceAnalyzer class)
+  - Extracts importance from CatBoost, LightGBM, XGBoost models
+  - Weighted averaging based on ensemble composition
+  - JSON export and PNG visualization support
+  - Usage: `FeatureImportanceAnalyzer.from_models(models).get_report()`
+- [x] **Bull-Market Momentum Features** (Completed 2026-01-23)
+  - 6 new features: momentum_5, momentum_10, rsi_momentum, trend_strength, price_position, breakout_flag
+  - Feature count: 21 → 27 base features
+  - Rationale: Bull markets require different technical indicators than mean-reversion
+  - Implementation: `app/ml/features.py::_add_momentum_features()`
+- [x] **Regime-Specific Trading Thresholds** (Completed 2026-01-23)
+  - ADR: ADR-001-Regime-Specific-Trading-Thresholds.md
+  - Config: `REGIME_TRADING_CONFIG` in `app/core/config.py`
+  - Thresholds:
+    - bull_trending: 0.4% buy, -0.1% sell, 30% position_scale (conservative)
+    - bear_trending: 0.2% buy, -0.2% sell, 70% position_scale
+    - sideways_volatile: 0.2% buy, -0.2% sell, 50% position_scale, disabled
+    - sideways_calm: 0.2% buy, -0.2% sell, 100% position_scale (optimal)
+  - Implementation: `_execute_trade_logic()` uses regime config dynamically
+- [x] **Walk-Forward OOS Validation** (Completed 2026-01-23)
+  - Enhanced function: `_walk_forward_validation_enhanced()` in training.py
+  - TimeSeriesSplit-based validation (default 5 splits)
+  - Overfit detection: `OOS/IS Sharpe ratio < 0.3` or `IS > 5 with OOS < 1`
+  - Model confidence: 0.1-1.0 based on OOS Sharpe performance
+  - Per-fold metrics logging: IS vs OOS comparison
+  - Impact: Early detection of suspicious models (bear_trending 10.47 Sharpe)
+
+**Model Performance Analysis (Pre-Enhancement):**
+| Regime | Accuracy | Sharpe | Status |
+|--------|----------|--------|--------|
+| bull_trending | 49.0% | -0.22 | ❌ Critical |
+| bear_trending | 52.8% | 10.47 | ⚠️ Overfit suspected |
+| sideways_calm | 53.2% | 6.53 | ✅ Good |
+| sideways_volatile | 52.2% | N/A | ⚠️ Disabled |
+
+**Expected Impact:**
+- bull_trending: Conservative thresholds prevent losses from weak model
+- bear_trending: OOS validation will detect overfit before deployment
+- Overall: Feature importance analysis enables data-driven model improvement
+
 ---
 
 ## 🛡️ Phase I: Advanced Risk & Position Defense (Partial Complete 2026-01-04)

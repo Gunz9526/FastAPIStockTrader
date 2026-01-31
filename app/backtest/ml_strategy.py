@@ -1,8 +1,10 @@
-import backtrader as bt
 import logging
+
+import backtrader as bt
 import pandas as pd
-from app.ml.predictor import PredictorService
+
 from app.ml.features import FeatureEngineer
+from app.ml.predictor import PredictorService
 
 logger = logging.getLogger(__name__)
 
@@ -71,13 +73,13 @@ class MLStrategy(bt.Strategy):
         # 1. Prepare Data for Prediction (Need history for features)
         # Backtrader feeds data bar by bar. We need to construct a DataFrame window.
         # This is tricky in Backtrader. We'll use a hack or assume we can access full history.
-        # Better approach: We pre-calculate predictions before backtest? 
+        # Better approach: We pre-calculate predictions before backtest?
         # No, to simulate reality, we should calculate on the fly (or use pre-calc aligned by date).
-        
+
         # Simpler approach for verification:
         # Pre-calculated predictions passed as a separate data feed or csv is more efficient,
         # but let's try to simulate 'PredictorService' usage.
-        
+
         try:
             # Construct DataFrame from recent history (e.g. last 100 bars)
             # Accessing internal deque of Backtrader
@@ -97,11 +99,11 @@ class MLStrategy(bt.Strategy):
             dates = [
                 bt.num2date(d) for d in self.datas[0].datetime.get(ago=0, size=lookback)
             ]
-            
+
             df = pd.DataFrame(data_window)
             df['date_time'] = dates
             df.set_index('date_time', inplace=True)
-            
+
             # 2. Features
             features_df = self.feature_engineer.create_features(df)
             if features_df.empty:
@@ -112,13 +114,13 @@ class MLStrategy(bt.Strategy):
             scaled_features = self.feature_engineer.extract_feature_vector(
                 current_features, fit_scaler=False
             )
-            
+
             prediction = self.predictor.predict_next(scaled_features)
             self.predictions.append(prediction)
-            
+
             # 4. Trading Logic
             threshold = self.params.threshold
-            
+
             if not self.position:
                 if prediction > threshold:
                     # BUY
@@ -126,7 +128,7 @@ class MLStrategy(bt.Strategy):
                     if size > 0:
                         self.log(f'BUY CREATE, {self.dataclose[0]:.2f} (Pred: {prediction:.4f})')
                         self.order = self.buy(size=size)
-            
+
             else:
                 # Sell rule: Signal reversal or Stop loss/Take profit (not implemented here)
                 if prediction < -threshold:
@@ -134,6 +136,6 @@ class MLStrategy(bt.Strategy):
                     self.log(f'SELL CREATE, {self.dataclose[0]:.2f} (Pred: {prediction:.4f})')
                     self.order = self.close()
 
-        except Exception as e:
+        except Exception:
             # logger.error(f"Strategy error: {e}")
             pass

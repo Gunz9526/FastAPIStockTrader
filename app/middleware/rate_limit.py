@@ -1,11 +1,11 @@
 """
 Rate limiting using slowapi (FastAPI-compatible).
 """
-from slowapi import Limiter
-from slowapi.util import get_remote_address
 from fastapi import FastAPI, Request
-from slowapi.errors import RateLimitExceeded
 from fastapi.responses import JSONResponse
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 # Initialize limiter
 limiter = Limiter(key_func=get_remote_address)

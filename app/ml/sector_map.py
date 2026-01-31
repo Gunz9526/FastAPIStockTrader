@@ -5,9 +5,10 @@ Used for categorical feature engineering.
 Auto-fetches sector from yfinance if not in cache.
 """
 
-import yfinance as yf
 import logging
 from functools import lru_cache
+
+import yfinance as yf
 
 logger = logging.getLogger(__name__)
 
@@ -21,24 +22,24 @@ SECTOR_MAP = {
     'META': 'Technology',
     'AMD': 'Technology',
     'NFLX': 'Communication Services',
-    
+
     # Automotive
     'TSLA': 'Consumer Cyclical',
-    
+
     # Finance
     'JPM': 'Financial Services',
     'BAC': 'Financial Services',
     'V': 'Financial Services',
-    
+
     # Healthcare
     'JNJ': 'Healthcare',
     'PFE': 'Healthcare',
-    
+
     # Consumer
     'WMT': 'Consumer Defensive',
     'HD': 'Consumer Cyclical',
     'AMZN': 'Consumer Cyclical',
-    
+
     # Market Index
     'SPY': 'Market Index',
 }
@@ -72,10 +73,10 @@ def get_sector_from_yfinance(symbol: str) -> str:
         ticker = yf.Ticker(symbol)
         info = ticker.info
         sector = info.get('sector', 'Unknown')
-        
+
         logger.info(f"Auto-fetched sector for {symbol}: {sector}")
         return sector
-        
+
     except Exception as e:
         logger.warning(f"Failed to fetch sector for {symbol}: {e}")
         return 'Unknown'
@@ -95,16 +96,16 @@ def get_sector(symbol: str) -> str:
     """
     # Priority 1: Auto-fetch from yfinance (cached)
     sector = get_sector_from_yfinance(symbol)
-    
+
     # Priority 2: Fallback to manual map if API failed
     if sector == 'Unknown' and symbol in SECTOR_MAP:
         sector = SECTOR_MAP[symbol]
         logger.debug(f"Using manual sector for {symbol}: {sector}")
-    
+
     # Cache for future use (even if Unknown)
     if symbol not in SECTOR_MAP:
         SECTOR_MAP[symbol] = sector
-    
+
     return sector
 
 def get_sector_id(symbol: str) -> int:

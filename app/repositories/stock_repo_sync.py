@@ -1,30 +1,32 @@
-from sqlalchemy.orm import Session
+from datetime import UTC, datetime
+
 from sqlalchemy import select
-from typing import List, Optional
-from app.domain.models.stock import StockTicker, StockOHLCV, PositionTracking
+from sqlalchemy.orm import Session
+
+from app.domain.models.stock import PositionTracking, StockOHLCV, StockTicker
 from app.domain.schemas.stock import StockOHLCVCreate
-from datetime import datetime
+
 
 class SyncStockRepository:
     """Synchronous repository for Celery tasks"""
-    
+
     def __init__(self, db: Session):
         self.db = db
-    
-    def get_active_symbols(self) -> List[str]:
+
+    def get_active_symbols(self) -> list[str]:
         """Get active stock symbols (sync)"""
         result = self.db.execute(
             select(StockTicker.symbol).where(StockTicker.is_active == True)
         )
         return [row[0] for row in result]
-    
+
     def get_ohlcv_range(
-        self, 
-        symbol: str, 
-        start_date: datetime, 
+        self,
+        symbol: str,
+        start_date: datetime,
         end_date: datetime,
         timeframe: str = '15m'
-    ) -> List[StockOHLCV]:
+    ) -> list[StockOHLCV]:
         """Get OHLCV data for symbol in date range (sync)"""
         result = self.db.execute(
             select(StockOHLCV)
@@ -35,13 +37,13 @@ class SyncStockRepository:
             .order_by(StockOHLCV.date_time)
         )
         return list(result.scalars().all())
-    
+
     def get_ohlcv_by_datetime(
-        self, 
-        symbol: str, 
+        self,
+        symbol: str,
         date_time: datetime,
         timeframe: str = '15m'
-    ) -> Optional[StockOHLCV]:
+    ) -> StockOHLCV | None:
         """Get specific OHLCV bar by symbol and datetime (sync)"""
         result = self.db.execute(
             select(StockOHLCV)
@@ -50,23 +52,23 @@ class SyncStockRepository:
             .where(StockOHLCV.date_time == date_time)
         )
         return result.scalar_one_or_none()
-    
+
     def create_ohlcv(self, ohlcv_data: StockOHLCVCreate) -> StockOHLCV:
         """Create new OHLCV record (sync)"""
         ohlcv = StockOHLCV(**ohlcv_data.model_dump())
         self.db.add(ohlcv)
         self.db.flush()
         return ohlcv
-    
+
     # Position Tracking Methods (Phase I.1)
-    
+
     def record_position_entry(
         self,
         symbol: str,
         entry_price: float,
         quantity: int,
-        entry_time: Optional[datetime] = None,
-        regime: Optional[str] = None
+        entry_time: datetime | None = None,
+        regime: str | None = None
     ) -> PositionTracking:
         """
         Record position entry for defense mechanisms.
@@ -82,8 +84,8 @@ class SyncStockRepository:
             Created PositionTracking record
         """
         if entry_time is None:
-            entry_time = datetime.now()
-        
+            entry_time = datetime.now(UTC)  # timezone-aware
+
         position = PositionTracking(
             symbol=symbol,
             entry_time=entry_time,
@@ -94,8 +96,8 @@ class SyncStockRepository:
         self.db.add(position)
         self.db.flush()
         return position
-    
-    def get_active_position(self, symbol: str) -> Optional[PositionTracking]:
+
+    def get_active_position(self, symbol: str) -> PositionTracking | None:
         """
         Get active position (exit_time is NULL) for symbol.
         
@@ -112,8 +114,8 @@ class SyncStockRepository:
             .order_by(PositionTracking.entry_time.desc())
         )
         return result.scalar_one_or_none()
-    
-    def get_active_position_for_update(self, symbol: str) -> Optional[PositionTracking]:
+
+    def get_active_position_for_update(self, symbol: str) -> PositionTracking | None:
         """
         Get active position with pessimistic lock (FOR UPDATE).
         
@@ -143,13 +145,13 @@ class SyncStockRepository:
             .with_for_update()  # Pessimistic lock
         )
         return result.scalar_one_or_none()
-    
+
     def update_position_exit(
         self,
         position_id: int,
         exit_price: float,
-        exit_time: Optional[datetime] = None
-    ) -> Optional[PositionTracking]:
+        exit_time: datetime | None = None
+    ) -> PositionTracking | None:
         """
         Update position with exit information.
         
@@ -162,17 +164,17 @@ class SyncStockRepository:
             Updated PositionTracking or None
         """
         if exit_time is None:
-            exit_time = datetime.now()
-        
+            exit_time = datetime.now(UTC)  # timezone-aware
+
         result = self.db.execute(
             select(PositionTracking)
             .where(PositionTracking.id == position_id)
         )
         position = result.scalar_one_or_none()
-        
+
         if position:
             position.exit_time = exit_time
             position.exit_price = float(exit_price)  # Convert NumPy types to native Python
             self.db.flush()
-        
+
         return position

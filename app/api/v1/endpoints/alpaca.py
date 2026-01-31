@@ -1,7 +1,9 @@
-from fastapi import APIRouter, HTTPException, Depends
-from typing import Dict, Any, List, Optional
 import logging
+from typing import Any
+
 from alpaca.trading.client import TradingClient
+from fastapi import APIRouter, Depends, HTTPException
+
 from app.core.config import settings
 from app.core.security import get_api_key
 
@@ -19,11 +21,11 @@ def get_alpaca_client() -> TradingClient:
         )
     except Exception as e:
         logger.error(f"Alpaca 클라이언트 초기화 실패: {e}")
-        raise HTTPException(status_code=500, detail="Alpaca API 연결 실패")
+        raise HTTPException(status_code=500, detail="Alpaca API 연결 실패") from e
 
 
 @router.get("/account")
-async def get_account_info(api_key: str = Depends(get_api_key)) -> Dict[str, Any]:
+async def get_account_info(api_key: str = Depends(get_api_key)) -> dict[str, Any]:
     """
     Alpaca 계좌 정보 조회
     
@@ -44,7 +46,7 @@ async def get_account_info(api_key: str = Depends(get_api_key)) -> Dict[str, Any
     try:
         client = get_alpaca_client()
         account = client.get_account()
-        
+
         return {
             "account_number": account.account_number,
             "status": account.status,
@@ -69,11 +71,11 @@ async def get_account_info(api_key: str = Depends(get_api_key)) -> Dict[str, Any
         }
     except Exception as e:
         logger.error(f"계좌 정보 조회 실패: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/positions")
-async def get_all_positions(api_key: str = Depends(get_api_key)) -> List[Dict[str, Any]]:
+async def get_all_positions(api_key: str = Depends(get_api_key)) -> list[dict[str, Any]]:
     """
     모든 활성 포지션 조회
     
@@ -91,7 +93,7 @@ async def get_all_positions(api_key: str = Depends(get_api_key)) -> List[Dict[st
     try:
         client = get_alpaca_client()
         positions = client.get_all_positions()
-        
+
         result = []
         for pos in positions:
             result.append({
@@ -113,18 +115,18 @@ async def get_all_positions(api_key: str = Depends(get_api_key)) -> List[Dict[st
                 "change_today": float(pos.change_today),
                 "side": pos.side,
             })
-        
+
         return result
     except Exception as e:
         logger.error(f"포지션 조회 실패: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/positions/{symbol}")
 async def get_position_by_symbol(
     symbol: str,
     api_key: str = Depends(get_api_key)
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     특정 종목의 포지션 조회
     
@@ -137,7 +139,7 @@ async def get_position_by_symbol(
     try:
         client = get_alpaca_client()
         pos = client.get_open_position(symbol)
-        
+
         return {
             "symbol": pos.symbol,
             "asset_id": pos.asset_id,
@@ -159,9 +161,11 @@ async def get_position_by_symbol(
         }
     except Exception as e:
         if "position does not exist" in str(e).lower():
-            raise HTTPException(status_code=404, detail=f"{symbol} 포지션이 존재하지 않습니다")
+            raise HTTPException(
+                status_code=404, detail=f"{symbol} 포지션이 존재하지 않습니다"
+            )
         logger.error(f"{symbol} 포지션 조회 실패: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/portfolio/history")
@@ -169,7 +173,7 @@ async def get_portfolio_history(
     period: str = "1M",
     timeframe: str = "1D",
     api_key: str = Depends(get_api_key)
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     포트폴리오 히스토리 조회 (시계열 데이터)
     
@@ -189,7 +193,7 @@ async def get_portfolio_history(
             period=period,
             timeframe=timeframe
         )
-        
+
         return {
             "timestamp": history.timestamp,
             "equity": [float(e) for e in history.equity],
@@ -200,15 +204,15 @@ async def get_portfolio_history(
         }
     except Exception as e:
         logger.error(f"포트폴리오 히스토리 조회 실패: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/orders")
 async def get_orders(
-    status: Optional[str] = "all",
+    status: str | None = "all",
     limit: int = 50,
     api_key: str = Depends(get_api_key)
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """
     주문 내역 조회
     
@@ -221,7 +225,7 @@ async def get_orders(
     """
     try:
         client = get_alpaca_client()
-        
+
         from alpaca.trading.enums import QueryOrderStatus
         if status == "open":
             order_status = QueryOrderStatus.OPEN
@@ -229,14 +233,14 @@ async def get_orders(
             order_status = QueryOrderStatus.CLOSED
         else:
             order_status = QueryOrderStatus.ALL
-        
+
         from alpaca.trading.requests import GetOrdersRequest
         request = GetOrdersRequest(
             status=order_status,
             limit=limit
         )
         orders = client.get_orders(filter=request)
-        
+
         result = []
         for order in orders:
             result.append({
@@ -258,19 +262,19 @@ async def get_orders(
                 "limit_price": float(order.limit_price) if order.limit_price else None,
                 "stop_price": float(order.stop_price) if order.stop_price else None,
             })
-        
+
         return result
     except Exception as e:
         logger.error(f"주문 내역 조회 실패: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/activities")
 async def get_activities(
-    activity_type: Optional[str] = None,
+    activity_type: str | None = None,
     limit: int = 50,
     api_key: str = Depends(get_api_key)
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """
     계좌 활동 내역 조회 (거래, 입출금 등)
     
@@ -283,10 +287,10 @@ async def get_activities(
     """
     try:
         client = get_alpaca_client()
-        
-        from alpaca.trading.requests import GetAccountActivitiesRequest
+
         from alpaca.trading.enums import ActivityType
-        
+        from alpaca.trading.requests import GetAccountActivitiesRequest
+
         activity_types = None
         if activity_type:
             try:
@@ -296,12 +300,12 @@ async def get_activities(
                     status_code=400,
                     detail=f"잘못된 activity_type: {activity_type}"
                 )
-        
+
         request = GetAccountActivitiesRequest(
             activity_types=activity_types
         )
         activities = client.get_activities(filter=request)
-        
+
         result = []
         for activity in activities[:limit]:
             activity_dict = {
@@ -309,7 +313,7 @@ async def get_activities(
                 "activity_type": activity.activity_type,
                 "date": activity.date.isoformat() if activity.date else None,
             }
-            
+
             # FILL 타입인 경우 추가 정보
             if hasattr(activity, 'symbol'):
                 activity_dict.update({
@@ -318,10 +322,10 @@ async def get_activities(
                     "qty": float(activity.qty) if hasattr(activity, 'qty') else None,
                     "price": float(activity.price) if hasattr(activity, 'price') else None,
                 })
-            
+
             result.append(activity_dict)
-        
+
         return result
     except Exception as e:
         logger.error(f"활동 내역 조회 실패: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e

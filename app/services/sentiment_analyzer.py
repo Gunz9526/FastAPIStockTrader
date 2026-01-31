@@ -2,12 +2,12 @@
 감성 분석 서비스
 Phase F.1: 뉴스 감성(Gemini API)과 Redis 캐싱 통합
 """
-import os
-import logging
-from typing import Dict, Optional, List
-from datetime import datetime, timedelta
-import redis
 import json
+import logging
+import os
+from datetime import datetime
+
+import redis
 
 # Gemini API import (using new google-genai SDK)
 try:
@@ -34,12 +34,12 @@ class SentimentAnalyzer:
 
     캐시 TTL: 1시간 (감성은 자주 변동)
     """
-    
-    def __init__(self, redis_client: Optional[redis.Redis] = None):
+
+    def __init__(self, redis_client: redis.Redis | None = None):
         self.redis_client = redis_client or self._init_redis()
         self._init_gemini()
         self.cache_ttl = 3600  # 1 hour
-    
+
     def _init_redis(self) -> redis.Redis:
         """Redis 연결 초기화"""
         try:
@@ -55,36 +55,36 @@ class SentimentAnalyzer:
         except Exception as e:
             logger.warning(f"Redis 연결 실패: {e}. 캐시 사용 중지.")
             return None
-    
+
     def _init_gemini(self):
         """Gemini API 초기화 (google-genai SDK)"""
         if not GEMINI_AVAILABLE:
             logger.warning("google-genai 미설치: 감성 분석 비활성화")
             self.gemini_client = None
             return
-        
+
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             logger.warning("GEMINI_API_KEY 미설정: 감성 분석 비활성화")
             self.gemini_client = None
             return
-        
+
         try:
             self.gemini_client = genai.Client(api_key=api_key)
             logger.info("Gemini API 초기화됨 (감성 분석용)")
         except Exception as e:
             logger.error(f"Gemini API 초기화 실패: {e}")
             self.gemini_client = None
-    
+
     def get_cache_key(self, symbol: str) -> str:
         """Generate Redis cache key"""
         return f"sentiment:{symbol}"
-    
-    def get_cached_sentiment(self, symbol: str) -> Optional[float]:
+
+    def get_cached_sentiment(self, symbol: str) -> float | None:
         """Retrieve cached sentiment score"""
         if not self.redis_client:
             return None
-        
+
         try:
             cached = self.redis_client.get(self.get_cache_key(symbol))
             if cached:
@@ -93,14 +93,14 @@ class SentimentAnalyzer:
                 return data['score']
         except Exception as e:
             logger.warning(f"Cache retrieval failed for {symbol}: {e}")
-        
+
         return None
-    
+
     def cache_sentiment(self, symbol: str, score: float):
         """Store sentiment score in cache"""
         if not self.redis_client:
             return
-        
+
         try:
             data = {
                 'score': score,
@@ -115,7 +115,7 @@ class SentimentAnalyzer:
             logger.debug(f"캐시 저장 {symbol}: {score}")
         except Exception as e:
             logger.warning(f"캐시 저장 실패 {symbol}: {e}")
-    
+
     def analyze_news(self, symbol: str, news_text: str) -> float:
         """
         Analyze news text using Gemini API (google-genai SDK).
@@ -130,7 +130,7 @@ class SentimentAnalyzer:
         if not self.gemini_client:
             logger.warning("Gemini client not available. Returning neutral sentiment.")
             return 0.0
-        
+
         # Construct prompt for Gemini
         prompt = f"""
                 You are a financial sentiment analyst. Analyze the following news about {symbol} stock.
@@ -146,7 +146,7 @@ class SentimentAnalyzer:
                 Response format (JSON only):
                 {{"score": <float between -1.0 and 1.0>, "reasoning": "<brief explanation>"}}
                 """
-                    
+
         try:
             # Use google-genai client API
             response = self.gemini_client.models.generate_content(
@@ -154,28 +154,28 @@ class SentimentAnalyzer:
                 contents=prompt
             )
             result_text = response.text.strip()
-            
+
             # Parse JSON response
             # Sometimes Gemini wraps JSON in markdown code blocks
             if result_text.startswith("```json"):
                 result_text = result_text.replace("```json", "").replace("```", "").strip()
             elif result_text.startswith("```"):
                 result_text = result_text.replace("```", "").strip()
-            
+
             result = json.loads(result_text)
             score = float(result.get('score', 0.0))
-            
+
             # Clamp score to valid range
             score = max(-1.0, min(1.0, score))
-            
+
             logger.info(f"감성 점수 {symbol}: {score} | 사유: {result.get('reasoning', 'N/A')}")
             return score
-        
+
         except Exception as e:
             logger.error(f"Gemini API 호출 실패 {symbol}: {e}")
             return 0.0
-    
-    def get_sentiment_score(self, symbol: str, news_text: Optional[str] = None, force_refresh: bool = False) -> float:
+
+    def get_sentiment_score(self, symbol: str, news_text: str | None = None, force_refresh: bool = False) -> float:
         """
         Main entry point for sentiment analysis with caching.
         
@@ -192,22 +192,22 @@ class SentimentAnalyzer:
             cached_score = self.get_cached_sentiment(symbol)
             if cached_score is not None:
                 return cached_score
-        
+
         # If no news text provided, cannot analyze
         if not news_text:
             logger.warning(f"{symbol}에 대한 뉴스 텍스트 없음 — 중립(0.0) 반환")
             return 0.0
-        
+
         # Analyze and cache
         score = self.analyze_news(symbol, news_text)
         self.cache_sentiment(symbol, score)
-        
+
         return score
-    
+
     def get_regime_weighted_sentiment(
-        self, 
-        symbol: str, 
-        raw_score: float, 
+        self,
+        symbol: str,
+        raw_score: float,
         current_regime: str
     ) -> float:
         """
@@ -237,14 +237,14 @@ class SentimentAnalyzer:
                 adjusted = raw_score * 0.7
         else:  # SIDEWAYS_VOLATILE or SIDEWAYS_CALM
             adjusted = raw_score
-        
+
         # Clamp to valid range
         adjusted = max(-1.0, min(1.0, adjusted))
-        
+
         logger.debug(f"{symbol} 감성: raw={raw_score:.2f}, regime={current_regime}, adjusted={adjusted:.2f}")
         return adjusted
-    
-    def analyze_news_batch(self, news_data: Dict[str, str]) -> Dict[str, float]:
+
+    def analyze_news_batch(self, news_data: dict[str, str]) -> dict[str, float]:
         """
         Analyze news for MULTIPLE symbols in ONE Gemini API call.
         
@@ -256,11 +256,11 @@ class SentimentAnalyzer:
         """
         if not self.gemini_client:
             logger.warning("Gemini client not available. Returning neutral sentiment for all.")
-            return {symbol: 0.0 for symbol in news_data.keys()}
-        
+            return {symbol: 0.0 for symbol in news_data}
+
         if not news_data:
             return {}
-        
+
         # Construct batch prompt
         batch_prompt = """You are a financial sentiment analyst. Analyze news for multiple stocks.
 
@@ -268,12 +268,12 @@ For each stock, provide a sentiment score from -1.0 (extremely negative) to +1.0
 
 Stocks and news:
 """
-        
+
         for symbol, news in news_data.items():
             # Limit news to 500 chars per symbol to avoid token overflow
             truncated_news = news[:500] if len(news) > 500 else news
             batch_prompt += f"\n[{symbol}]\n{truncated_news}\n"
-        
+
         batch_prompt += """
 Response format (JSON only, no markdown):
 {
@@ -282,25 +282,25 @@ Response format (JSON only, no markdown):
     ...
 }
 """
-        
+
         try:
             response = self.gemini_client.models.generate_content(
                 model='gemini-2.5-flash-lite',  # Stable model with better quota
                 contents=batch_prompt
             )
             result_text = response.text.strip()
-            
+
             # Parse JSON response
             if result_text.startswith("```json"):
                 result_text = result_text.replace("```json", "").replace("```", "").strip()
             elif result_text.startswith("```"):
                 result_text = result_text.replace("```", "").strip()
-            
+
             results = json.loads(result_text)
-            
+
             # Extract scores
             scores = {}
-            for symbol in news_data.keys():
+            for symbol in news_data:
                 if symbol in results:
                     score = float(results[symbol].get('score', 0.0))
                     score = max(-1.0, min(1.0, score))  # Clamp
@@ -309,14 +309,14 @@ Response format (JSON only, no markdown):
                 else:
                     logger.warning(f"{symbol} not in batch response, using neutral")
                     scores[symbol] = 0.0
-            
+
             logger.info(f"배치 감성 분석 완료: {len(scores)}개 심볼, 1회 API 호출")
             return scores
-            
+
         except Exception as e:
             logger.error(f"배치 Gemini API 호출 실패: {e}")
             # Fallback to neutral for all
-            return {symbol: 0.0 for symbol in news_data.keys()}
+            return {symbol: 0.0 for symbol in news_data}
 
 
 # Singleton instance (optional)

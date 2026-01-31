@@ -1,19 +1,15 @@
+import logging
+import time
 from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-import time
 
 from app.api.v1.api import api_router
 from app.core.config import settings
 from app.core.logging import setup_logging
+from app.core.metrics import api_requests_total, api_response_time, metrics_endpoint
 from app.middleware.rate_limit import setup_rate_limiting
-from app.core.metrics import (
-    api_requests_total,
-    api_response_time,
-    metrics_endpoint
-)
-
-import logging
 
 # Setup Logging
 setup_logging()
@@ -44,13 +40,13 @@ setup_rate_limiting(app)
 async def metrics_middleware(request: Request, call_next):
     method = request.method
     endpoint = request.url.path
-    
+
     # Extract client IP (handles X-Forwarded-For for proxies)
     client_ip = request.client.host if request.client else "unknown"
     forwarded_for = request.headers.get("X-Forwarded-For")
     if forwarded_for:
         client_ip = forwarded_for.split(",")[0].strip()
-    
+
     # Log incoming request with IP
     logger.info(
         f"[{method}] {endpoint} - IP: {client_ip}",
@@ -61,15 +57,15 @@ async def metrics_middleware(request: Request, call_next):
             "user_agent": request.headers.get("User-Agent", "unknown")
         }
     )
-    
+
     start_time = time.time()
     response = await call_next(request)
     duration = time.time() - start_time
-    
+
     # Record metrics
     api_requests_total.labels(method=method, endpoint=endpoint, status=response.status_code).inc()
     api_response_time.labels(method=method, endpoint=endpoint).observe(duration)
-    
+
     return response
 
 # Request logging middleware

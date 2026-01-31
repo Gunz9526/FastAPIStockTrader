@@ -1,11 +1,11 @@
-import pandas as pd
-import numpy as np
-import talib
 import logging
-from sklearn.preprocessing import StandardScaler
-import joblib
 import os
-from typing import Optional, Dict
+
+import joblib
+import pandas as pd
+import talib
+from sklearn.preprocessing import StandardScaler
+
 from app.ml.sector_map import get_sector_id
 
 logger = logging.getLogger(__name__)
@@ -19,9 +19,9 @@ class FeatureEngineer:
     - Sentiment analysis integration (Gemini API + Redis)
     - Fundamental metrics (P/E, P/B, ROE via yfinance)
     """
-    
+
     def __init__(
-        self, 
+        self,
         scaler_path: str = "/app/model_artifacts/feature_scaler.pkl",
         sentiment_analyzer = None,
         fundamental_provider = None
@@ -29,13 +29,13 @@ class FeatureEngineer:
         self.scaler_path = scaler_path
         self.scaler = self._load_or_create_scaler()
         self.feature_names = None
-        
+
         # Phase F.1: Sentiment analyzer (lazy loading)
         self._sentiment_analyzer = sentiment_analyzer
-        
+
         # Phase F.2: Fundamental data provider (lazy loading)
         self._fundamental_provider = fundamental_provider
-    
+
     def _load_or_create_scaler(self):
         """Load existing scaler or create new one."""
         if os.path.exists(self.scaler_path):
@@ -44,7 +44,7 @@ class FeatureEngineer:
             except Exception as e:
                 logger.warning(f"Failed to load scaler: {e}. Creating new one.")
         return StandardScaler()
-    
+
     @property
     def sentiment_analyzer(self):
         """Lazy load sentiment analyzer"""
@@ -56,7 +56,7 @@ class FeatureEngineer:
                 logger.warning(f"Sentiment analyzer initialization failed: {e}")
                 self._sentiment_analyzer = None
         return self._sentiment_analyzer
-    
+
     @property
     def fundamental_provider(self):
         """Lazy load fundamental data provider"""
@@ -68,7 +68,7 @@ class FeatureEngineer:
                 logger.warning(f"Fundamental provider initialization failed: {e}")
                 self._fundamental_provider = None
         return self._fundamental_provider
-    
+
     def add_technical_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Adds RSI, MACD, BBANDS, SMA, EMA, ATR to the dataframe.
@@ -79,25 +79,25 @@ class FeatureEngineer:
         if df.empty or len(df) < 30:
             logger.warning("Insufficient data for indicator calculation")
             return pd.DataFrame()
-            
+
         try:
             df = df.copy()
-            
+
             # Ensure float types
             close = df['close'].astype(float).values
             high = df['high'].astype(float).values
             low = df['low'].astype(float).values
             volume = df['volume'].astype(float).values
-            
+
             # 1. RSI
             df['rsi'] = talib.RSI(close, timeperiod=14)
-            
+
             # 2. MACD
             macd, macdsignal, macdhist = talib.MACD(close, fastperiod=12, slowperiod=26, signalperiod=9)
             df['macd'] = macd
             df['macd_signal'] = macdsignal
             df['macd_hist'] = macdhist
-            
+
             # 3. Bollinger Bands
             upper, middle, lower = talib.BBANDS(close, timeperiod=20, nbdevup=2, nbdevdn=2, matype=0)
             df['bb_upper'] = upper
@@ -107,34 +107,34 @@ class FeatureEngineer:
             # Prevent divide-by-zero: add epsilon to denominator
             band_range = upper - lower
             df['bb_position'] = (close - lower) / (band_range + 1e-8)  # Safe division
-            
+
             # 4. Moving Averages
             df['sma_20'] = talib.SMA(close, timeperiod=20)
             df['sma_50'] = talib.SMA(close, timeperiod=50)
             df['ema_12'] = talib.EMA(close, timeperiod=12)
             df['ema_26'] = talib.EMA(close, timeperiod=26)
-            
+
             # 5. ATR (Volatility)
             df['atr'] = talib.ATR(high, low, close, timeperiod=14)
             df['atr_pct'] = df['atr'] / close  # Normalized ATR
-            
+
             # 6. ADX (Trend Strength)
             df['adx'] = talib.ADX(high, low, close, timeperiod=14)
-            
+
             # 7. Stochastic
             slowk, slowd = talib.STOCH(high, low, close, fastk_period=14, slowk_period=3, slowd_period=3)
             df['stoch_k'] = slowk
             df['stoch_d'] = slowd
-            
+
             # 8. Volume indicators
             df['obv'] = talib.OBV(close, volume)
             df['volume_sma'] = talib.SMA(volume, timeperiod=20)
             df['volume_ratio'] = volume / df['volume_sma']
-            
+
             # 9. Price momentum
             df['roc'] = talib.ROC(close, timeperiod=10)  # Rate of Change
             df['mom'] = talib.MOM(close, timeperiod=10)  # Momentum
-            
+
             # 10. Sector feature (categorical)
             if 'symbol' in df.columns:
                 # Get the first symbol value (assumes all rows are same symbol)
@@ -143,7 +143,7 @@ class FeatureEngineer:
             else:
                 logger.warning("No 'symbol' column found - cannot add sector feature")
                 df['sector_id'] = 5  # Unknown sector
-            
+
             # 11. VWAP-based features (if VWAP data available)
             if 'vwap' in df.columns and df['vwap'].notna().any():
                 # VWAP distance: how far is price from VWAP (institutional benchmark)
@@ -151,7 +151,7 @@ class FeatureEngineer:
             else:
                 # If VWAP not available, use neutral value
                 df['vwap_distance'] = 0.0
-            
+
             # 12. Trade count intensity (if trade_count data available)
             # Higher trade count indicates higher market participation and liquidity
             if 'trade_count' in df.columns and df['trade_count'].notna().any():
@@ -161,31 +161,52 @@ class FeatureEngineer:
             else:
                 # If trade_count not available, use neutral value
                 df['trade_intensity'] = 1.0
-            
-            # 12. Sentiment features (Phase F.1)
+
+            # 13. Momentum features (Phase H.4 - Bull Regime Enhancement)
+            # These features are optimized for trending market conditions
+            df['momentum_5'] = close / talib.SMA(close, timeperiod=5) - 1  # 5-bar momentum
+            df['momentum_10'] = close / talib.SMA(close, timeperiod=10) - 1  # 10-bar momentum
+
+            # RSI momentum: direction of RSI change (positive = strengthening)
+            rsi_values = df['rsi'].values
+            df['rsi_momentum'] = pd.Series(rsi_values).diff(5).fillna(0).values
+
+            # Trend strength: normalized trend measure using EMA spread
+            ema_spread = df['ema_12'] - df['ema_26']
+            df['trend_strength'] = ema_spread / (df['atr'] + 1e-8)
+
+            # Price position in 20-bar high-low range (0=low, 1=high)
+            high_20 = talib.MAX(high, timeperiod=20)
+            low_20 = talib.MIN(low, timeperiod=20)
+            df['price_position'] = (close - low_20) / (high_20 - low_20 + 1e-8)
+
+            # Breakout flag: 1 if close > 20-bar high, else 0
+            df['breakout_flag'] = (close > talib.MAX(high, timeperiod=20)).astype(float)
+
+            # 14. Sentiment features (Phase F.1)
             # NOTE: Sentiment is fetched separately and passed as additional context
             # We'll add it during extract_feature_vector if available
-            
-            # 13. Fundamental features (Phase F.2)
+
+            # 15. Fundamental features (Phase F.2)
             # NOTE: Fundamentals are fetched separately and passed as additional context
             # We'll add them during extract_feature_vector if available
-            
+
             # Drop NaNs
             df.dropna(inplace=True)
-            
+
             return df
 
         except Exception as e:
             logger.error(f"Error computing features: {e}", exc_info=True)
             return pd.DataFrame()
-    
+
     def extract_feature_vector(
-        self, 
-        df: pd.DataFrame, 
-        fit_scaler: bool = False, 
+        self,
+        df: pd.DataFrame,
+        fit_scaler: bool = False,
         market_avg_volume: float = None,
-        sentiment_score: Optional[float] = None,
-        fundamental_data: Optional[Dict[str, float]] = None
+        sentiment_score: float | None = None,
+        fundamental_data: dict[str, float] | None = None
     ) -> pd.DataFrame:
         """
         Extract and normalize feature vector for ML model.
@@ -202,23 +223,23 @@ class FeatureEngineer:
         """
         if df.empty:
             return pd.DataFrame()
-        
+
         # DataFrame copy 명시적 생성 (SettingWithCopyWarning 방지)
         df = df.copy()
-        
+
         try:
             # 시장 대비 거래량 피처 추가
             if market_avg_volume is not None and 'volume' in df.columns:
                 df.loc[:, 'relative_volume'] = df['volume'] / market_avg_volume
             else:
                 df.loc[:, 'relative_volume'] = 1.0  # 시장 데이터 없으면 중립값
-            
+
             # Sentiment 피처 추가 (Phase F.1)
             if sentiment_score is not None:
                 df.loc[:, 'sentiment_score'] = sentiment_score
             else:
                 df.loc[:, 'sentiment_score'] = 0.0  # Sentiment 데이터 없으면 중립값
-            
+
             # Fundamentals 피처 추가 (Phase F.2)
             if fundamental_data is not None:
                 df.loc[:, 'pe_ratio'] = fundamental_data.get('pe_ratio', 15.0)  # 시장 평균 기본값
@@ -231,37 +252,47 @@ class FeatureEngineer:
                 df.loc[:, 'pb_ratio'] = 3.0
                 df.loc[:, 'roe'] = 0.10
                 df.loc[:, 'beta'] = 1.0
-            
+
             # Select features for model (exclude OHLCV and date)
+            # Full feature list including Phase H.4 momentum features
             feature_cols = [
+                # Core technical indicators
                 'rsi', 'macd', 'macd_signal', 'macd_hist',
                 'bb_width', 'bb_position',
                 'sma_20', 'sma_50', 'ema_12', 'ema_26',
                 'atr_pct', 'adx',
                 'stoch_k', 'stoch_d',
                 'volume_ratio', 'roc', 'mom',
-                'sector_id', 'relative_volume',  # Cross-sectional features
-                'vwap_distance',  # VWAP feature (Phase G)
-                'sentiment_score',  # Sentiment feature (Phase F.1)
-                'pe_ratio', 'pb_ratio', 'roe', 'beta'  # Fundamental features (Phase F.2)
+                # Cross-sectional features
+                'sector_id', 'relative_volume',
+                # VWAP & liquidity features
+                'vwap_distance', 'trade_intensity',
+                # Phase H.4: Momentum features for bull regime
+                'momentum_5', 'momentum_10',
+                'rsi_momentum', 'trend_strength',
+                'price_position', 'breakout_flag',
+                # Phase F.1: Sentiment feature
+                'sentiment_score',
+                # Phase F.2: Fundamental features
+                'pe_ratio', 'pb_ratio', 'roe', 'beta',
             ]
-            
+
             # Filter available columns
             available_features = [col for col in feature_cols if col in df.columns]
-            
+
             if not available_features:
                 logger.error("No features available for extraction")
                 return pd.DataFrame()
-            
+
             X = df[available_features].copy()
-            
+
             # Store feature names
             self.feature_names = available_features
-            
+
             # Normalize (exclude categorical sector_id)
             numeric_features = [f for f in available_features if f != 'sector_id']
             categorical_features = [f for f in available_features if f == 'sector_id']
-            
+
             if numeric_features:
                 if fit_scaler:
                     X_numeric_scaled = self.scaler.fit_transform(X[numeric_features])
@@ -271,22 +302,36 @@ class FeatureEngineer:
                     logger.info("Scaler fitted and saved to %s", self.scaler_path)
                 else:
                     X_numeric_scaled = self.scaler.transform(X[numeric_features])
+
+                # CRITICAL: Build DataFrame in EXACT order of available_features
+                # This ensures feature names AND order match training
+                X_normalized = pd.DataFrame(index=X.index)
                 
-                # Convert back to DataFrame
-                X_normalized = pd.DataFrame(X_numeric_scaled, columns=numeric_features, index=X.index)
+                # Create dict for fast lookup
+                numeric_dict = dict(zip(numeric_features, X_numeric_scaled.T))
                 
-                # Add categorical features (not scaled)
-                for cat_feat in categorical_features:
-                    X_normalized[cat_feat] = X[cat_feat].values
+                # Add features in available_features order
+                for feat in available_features:
+                    if feat in numeric_features:
+                        X_normalized[feat] = numeric_dict[feat]
+                    else:  # categorical (sector_id)
+                        X_normalized[feat] = X[feat].values
             else:
                 X_normalized = X
+
+            # CRITICAL: Verify DataFrame format and column order
+            assert isinstance(X_normalized, pd.DataFrame), "extract_feature_vector must return DataFrame"
+            assert list(X_normalized.columns) == available_features, (
+                f"Column mismatch: got {list(X_normalized.columns)} but expected {available_features}"
+            )
+            logger.debug(f"Extracted features (count={len(available_features)}): {list(X_normalized.columns)}")
             
             return X_normalized
-            
+
         except (ValueError, KeyError, TypeError) as e:
             logger.error("Error extracting features: %s", str(e), exc_info=True)
             return pd.DataFrame()
-    
+
     def get_latest_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Get the latest row of features (for live prediction).
@@ -296,9 +341,9 @@ class FeatureEngineer:
         """
         if df.empty:
             return pd.DataFrame()
-        
+
         return df.iloc[[-1]]
-    
+
     def create_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Convenience method: adds technical indicators and returns DataFrame.
@@ -311,30 +356,38 @@ class FeatureEngineer:
             DataFrame with indicators (not scaled)
         """
         return self.add_technical_indicators(df)
-    
+
     @property
     def base_feature_columns(self) -> list:
         """
         Return base technical indicator features only (for training on historical data).
-        
+
         This excludes Phase F features (sentiment, fundamentals) which are not available
         in historical OHLCV data. Use this for model training on historical data.
-        
+
         Returns:
-            List of 20 base technical indicator feature names
+            List of 27 base technical indicator feature names (including Phase H.4 momentum)
         """
         return [
+            # Core technical indicators (17)
             'rsi', 'macd', 'macd_signal', 'macd_hist',
             'bb_width', 'bb_position',
             'sma_20', 'sma_50', 'ema_12', 'ema_26',
             'atr_pct', 'adx',
             'stoch_k', 'stoch_d',
             'volume_ratio', 'roc', 'mom',
-            'sector_id', 'relative_volume',  # Cross-sectional features
-            'vwap_distance',  # VWAP feature (Phase G)
-            'trade_intensity'  # Trade count feature (liquidity indicator)
+            # Cross-sectional features (2)
+            'sector_id', 'relative_volume',
+            # VWAP & liquidity (2)
+            'vwap_distance', 'trade_intensity',
+            # Phase H.4: Momentum features for bull regime (6)
+            'momentum_5', 'momentum_10',  # Price momentum
+            'rsi_momentum',  # RSI trend direction
+            'trend_strength',  # Normalized trend measure
+            'price_position',  # Position in 20-bar range
+            'breakout_flag',  # Breakout detection
         ]
-    
+
     @property
     def feature_columns(self) -> list:
         """
@@ -350,13 +403,13 @@ class FeatureEngineer:
             'sentiment_score',  # Sentiment feature (Phase F.1)
             'pe_ratio', 'pb_ratio', 'roe', 'beta'  # Fundamental features (Phase F.2)
         ]
-    
+
     def add_sentiment_and_fundamentals(
-        self, 
-        df: pd.DataFrame, 
+        self,
+        df: pd.DataFrame,
         symbol: str,
-        news_text: Optional[str] = None,
-        current_regime: Optional[str] = None
+        news_text: str | None = None,
+        current_regime: str | None = None
     ) -> pd.DataFrame:
         """
         Add sentiment and fundamental features to DataFrame.
@@ -374,9 +427,9 @@ class FeatureEngineer:
         """
         if df.empty:
             return df
-        
+
         df = df.copy()
-        
+
         # Phase F.1: Add sentiment score
         sentiment_score = 0.0
         if self.sentiment_analyzer and news_text:
@@ -387,11 +440,11 @@ class FeatureEngineer:
                 )
             else:
                 sentiment_score = raw_sentiment
-            
+
             logger.info("%s sentiment added: %.3f", symbol, sentiment_score)
-        
+
         df['sentiment_score'] = sentiment_score
-        
+
         # Phase F.2: Add fundamental metrics
         if self.fundamental_provider:
             fundamentals = self.fundamental_provider.get_fundamentals(symbol)
@@ -399,7 +452,7 @@ class FeatureEngineer:
             df['pb_ratio'] = fundamentals.get('pb_ratio', 3.0)
             df['roe'] = fundamentals.get('roe', 0.10)
             df['beta'] = fundamentals.get('beta', 1.0)
-            
+
             logger.info("%s fundamentals added: PE=%.2f", symbol, df['pe_ratio'].iloc[0])
         else:
             # 기본값
@@ -407,5 +460,5 @@ class FeatureEngineer:
             df['pb_ratio'] = 3.0
             df['roe'] = 0.10
             df['beta'] = 1.0
-        
+
         return df

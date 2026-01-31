@@ -1,8 +1,8 @@
-import os
-import pandas as pd
-import joblib
 import logging
-from typing import Optional
+import os
+
+import pandas as pd
+
 from app.ml.models import EnsembleWrapper
 from app.services.regime import MarketRegime
 
@@ -13,7 +13,7 @@ class PredictorService:
     Regime-aware predictor service using ensemble models.
     Supports 4 market regimes with dedicated models.
     """
-    
+
     _instance = None
     _models = {}
     _base_path = "/app/model_artifacts/"
@@ -23,17 +23,17 @@ class PredictorService:
         MarketRegime.SIDEWAYS_VOLATILE: "ensemble_model_sideways_volatile.pkl",
         MarketRegime.SIDEWAYS_CALM: "ensemble_model_sideways_calm.pkl"
     }
-    
+
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super(PredictorService, cls).__new__(cls)
             cls._instance._initialize()
         return cls._instance
-    
+
     def _initialize(self):
         """Initialize all regime-specific models."""
         self._models = {}
-        
+
         # Try to load regime-specific models
         for regime, filename in self._model_map.items():
             model_path = os.path.join(self._base_path, filename)
@@ -47,7 +47,7 @@ class PredictorService:
                     logger.warning(f"✗ {regime.value} model not found: {filename}")
             except Exception as e:
                 logger.error(f"Failed to load {regime.value} model: {e}")
-        
+
         # Fallback: Load generic model if no regime models
         if not self._models:
             generic_path = os.path.join(self._base_path, "ensemble_model.pkl")
@@ -60,17 +60,27 @@ class PredictorService:
                 logger.warning("⚠ No regime-specific models, using generic model for all regimes")
             else:
                 logger.error("No models found (regime or generic). Train models first.")
-    
-    def get_model(self, regime: MarketRegime = MarketRegime.SIDEWAYS_CALM) -> Optional[EnsembleWrapper]:
+
+    def get_model(self, regime: MarketRegime = MarketRegime.SIDEWAYS_CALM) -> EnsembleWrapper | None:
         """Get model for specific regime."""
         return self._models.get(regime, None)
-    
+
+    def reload_models(self):
+        """
+        Reload all regime models from disk.
+        Call this after training to pick up new model files.
+        """
+        logger.info("Reloading regime models from disk...")
+        self._models = {}
+        self._initialize()
+        logger.info(f"Reloaded {len(self._models)} models")
+
     def predict_next(self, features: pd.DataFrame, regime: MarketRegime = MarketRegime.SIDEWAYS_CALM) -> float:
         """
         Predict next value using regime-aware model.
         
         Args:
-            features: Feature DataFrame (single row or multiple)
+            features: Feature DataFrame (single row or multiple) with column names
             regime: Current market regime
         
         Returns:
@@ -80,8 +90,23 @@ class PredictorService:
         if model is None:
             logger.warning(f"No model for regime {regime.value}, returning neutral")
             return 0.5
-        
+
         try:
+            # Ensure DataFrame format with column names (XGBoost requirement)
+            if not isinstance(features, pd.DataFrame):
+                logger.warning("Features not DataFrame, converting...")
+                # XGBoost requires feature names - get from model
+                feature_names = model.model.feature_names_in_ if hasattr(model.model, 'feature_names_in_') else None
+                if feature_names is not None:
+                    features = pd.DataFrame(features, columns=feature_names)
+                else:
+                    # Fallback: try to infer from features array shape
+                    logger.error("Cannot convert to DataFrame: no feature names available")
+                    return 0.5
+            
+            # XGBoost 피처 문제 디버깅용 (문제 해결 후 DEBUG로 변경)
+            logger.debug(f"Features type: {type(features)}, columns: {list(features.columns) if isinstance(features, pd.DataFrame) else 'N/A'}, shape: {features.shape}")
+            
             prediction = model.predict(features)
             if isinstance(prediction, pd.Series):
                 return float(prediction.iloc[0])
@@ -89,13 +114,13 @@ class PredictorService:
         except Exception as e:
             logger.error(f"Prediction error for regime {regime.value}: {e}", exc_info=True)
             return 0.5
-    
+
     def retrain(self, X: pd.DataFrame, y: pd.Series) -> bool:
         """
         Retrain model with equal weights (deprecated, use retrain_weighted).
         """
         return self.retrain_weighted(X, y, weights=None)
-    
+
     def retrain_weighted(self, X: pd.DataFrame, y: pd.Series, weights: list = None, model_params: dict = None) -> bool:
         """
         Retrain model with optional weights and hyperparameters.
@@ -112,17 +137,17 @@ class PredictorService:
         try:
             model = EnsembleWrapper(weights=weights, model_params=model_params)
             model.train(X, y)
-            
+
             os.makedirs(os.path.dirname(self._model_path), mode=0o777, exist_ok=True)
             model.save(self._model_path)
-            
+
             self._model = model
             logger.info("Model retrained successfully")
             return True
         except Exception as e:
             logger.error(f"Retraining failed: {e}", exc_info=True)
             return False
-    
+
     def get_model_info(self) -> dict:
         """Get model metadata including weights and training date."""
         if self._models and hasattr(self._models, 'metadata'):

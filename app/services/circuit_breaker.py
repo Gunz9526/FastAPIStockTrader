@@ -29,10 +29,9 @@
 """
 import logging
 import time
-from enum import Enum
-from datetime import datetime, date, timedelta
-from typing import Optional, Dict
 from contextlib import contextmanager
+from datetime import date, datetime, timedelta
+from enum import Enum
 from threading import Lock
 
 from app.core.cache import cache
@@ -54,10 +53,10 @@ class CircuitBreaker:
     일일 손실, API 레이턴시, 연속 실패를 모니터링하고
     임계값 초과 시 자동으로 트레이딩을 중단합니다.
     """
-    
+
     # Redis 키 접두사
     REDIS_PREFIX = "circuit_breaker:"
-    
+
     def __init__(
         self,
         daily_loss_limit_pct: float = 0.03,        # 일일 손실 한도 (포트폴리오의 3%)
@@ -87,60 +86,60 @@ class CircuitBreaker:
         self.vix_extreme_threshold = vix_extreme_threshold
         self.recovery_timeout_minutes = recovery_timeout_minutes
         self.half_open_max_trades = half_open_max_trades
-        
+
         # 인메모리 상태 (Redis 백업)
         self._state = CircuitState.CLOSED
-        self._opened_at: Optional[datetime] = None
+        self._opened_at: datetime | None = None
         self._consecutive_failures = 0
-        self._daily_pnl: Dict[date, float] = {}
+        self._daily_pnl: dict[date, float] = {}
         self._api_latencies: list = []
         self._half_open_trade_count = 0
-        
+
         # 스레드 안전성
         self._lock = Lock()
-        
+
         # Redis에서 상태 복원
         self._restore_from_redis()
-    
+
     def _restore_from_redis(self) -> None:
         """Redis에서 상태 복원."""
         try:
             state = cache.get(f"{self.REDIS_PREFIX}state")
             if state:
                 self._state = CircuitState(state)
-            
+
             opened_at = cache.get(f"{self.REDIS_PREFIX}opened_at")
             if opened_at:
                 self._opened_at = datetime.fromisoformat(opened_at)
-            
+
             failures = cache.get(f"{self.REDIS_PREFIX}consecutive_failures")
             if failures:
                 self._consecutive_failures = int(failures)
-                
+
             logger.info("Circuit Breaker 상태 복원: %s", self._state.value)
         except Exception as e:
             logger.warning("Circuit Breaker 상태 복원 실패: %s", str(e))
-    
+
     def _save_to_redis(self) -> None:
         """상태를 Redis에 저장."""
         try:
             cache.set(f"{self.REDIS_PREFIX}state", self._state.value, ttl_seconds=86400)
-            
+
             if self._opened_at:
                 cache.set(
-                    f"{self.REDIS_PREFIX}opened_at", 
-                    self._opened_at.isoformat(), 
+                    f"{self.REDIS_PREFIX}opened_at",
+                    self._opened_at.isoformat(),
                     ttl_seconds=86400
                 )
-            
+
             cache.set(
-                f"{self.REDIS_PREFIX}consecutive_failures", 
-                str(self._consecutive_failures), 
+                f"{self.REDIS_PREFIX}consecutive_failures",
+                str(self._consecutive_failures),
                 ttl_seconds=86400
             )
         except Exception as e:
             logger.warning("Circuit Breaker 상태 저장 실패: %s", str(e))
-    
+
     @property
     def state(self) -> CircuitState:
         """현재 상태 반환 (자동 복구 확인 포함)."""
@@ -150,23 +149,23 @@ class CircuitBreaker:
                 elapsed = datetime.now() - self._opened_at
                 if elapsed > timedelta(minutes=self.recovery_timeout_minutes):
                     self._transition_to_half_open()
-            
+
             return self._state
-    
+
     def _transition_to_open(self, reason: str) -> None:
         """OPEN 상태로 전환 (트레이딩 차단)."""
         self._state = CircuitState.OPEN
         self._opened_at = datetime.now()
         self._save_to_redis()
         logger.warning("Circuit Breaker OPEN: %s", reason)
-    
+
     def _transition_to_half_open(self) -> None:
         """HALF_OPEN 상태로 전환 (제한된 테스트)."""
         self._state = CircuitState.HALF_OPEN
         self._half_open_trade_count = 0
         self._save_to_redis()
         logger.info("Circuit Breaker HALF_OPEN: 복구 테스트 시작")
-    
+
     def _transition_to_closed(self) -> None:
         """CLOSED 상태로 전환 (정상 운영)."""
         self._state = CircuitState.CLOSED
@@ -175,8 +174,8 @@ class CircuitBreaker:
         self._half_open_trade_count = 0
         self._save_to_redis()
         logger.info("Circuit Breaker CLOSED: 정상 운영 재개")
-    
-    def can_trade(self, portfolio_value: Optional[float] = None) -> bool:
+
+    def can_trade(self, portfolio_value: float | None = None) -> bool:
         """
         트레이딩 가능 여부 확인.
         
@@ -187,23 +186,23 @@ class CircuitBreaker:
             트레이딩 가능 시 True
         """
         current_state = self.state  # 자동 복구 확인 포함
-        
+
         if current_state == CircuitState.OPEN:
             return False
-        
+
         if current_state == CircuitState.HALF_OPEN:
             with self._lock:
                 if self._half_open_trade_count >= self.half_open_max_trades:
                     return False
-        
+
         # 일일 손실 한도 확인
         if portfolio_value:
             today = date.today()
             daily_loss = self._daily_pnl.get(today, 0.0)
             loss_pct = abs(daily_loss) / portfolio_value if portfolio_value > 0 else 0
-            
+
             if daily_loss < 0 and (
-                loss_pct >= self.daily_loss_limit_pct or 
+                loss_pct >= self.daily_loss_limit_pct or
                 abs(daily_loss) >= self.daily_loss_limit_usd
             ):
                 with self._lock:
@@ -211,7 +210,7 @@ class CircuitBreaker:
                         f"일일 손실 한도 초과: ${daily_loss:.2f} ({loss_pct:.1%})"
                     )
                 return False
-        
+
         # VIX 극단치 확인
         try:
             vix_cached = cache.get("vix:latest")
@@ -223,9 +222,9 @@ class CircuitBreaker:
                     return False
         except (ValueError, TypeError):
             pass
-        
+
         return True
-    
+
     def record_trade_result(self, success: bool, pnl: float = 0.0) -> None:
         """
         거래 결과 기록.
@@ -236,15 +235,15 @@ class CircuitBreaker:
         """
         with self._lock:
             today = date.today()
-            
+
             # 손익 기록
             if today not in self._daily_pnl:
                 self._daily_pnl[today] = 0.0
             self._daily_pnl[today] += pnl
-            
+
             if success:
                 self._consecutive_failures = 0
-                
+
                 # HALF_OPEN 상태에서 성공 시 CLOSED로 전환
                 if self._state == CircuitState.HALF_OPEN:
                     self._half_open_trade_count += 1
@@ -252,15 +251,15 @@ class CircuitBreaker:
                         self._transition_to_closed()
             else:
                 self._consecutive_failures += 1
-                
+
                 # 연속 실패 한도 초과 확인
                 if self._consecutive_failures >= self.max_consecutive_failures:
                     self._transition_to_open(
                         f"연속 {self._consecutive_failures}회 거래 실패"
                     )
-            
+
             self._save_to_redis()
-    
+
     @contextmanager
     def track_api_call(self):
         """
@@ -276,7 +275,7 @@ class CircuitBreaker:
         finally:
             elapsed_ms = (time.time() - start_time) * 1000
             self._record_latency(elapsed_ms)
-    
+
     def _record_latency(self, latency_ms: float) -> None:
         """API 레이턴시 기록."""
         with self._lock:
@@ -284,27 +283,27 @@ class CircuitBreaker:
             self._api_latencies.append(latency_ms)
             if len(self._api_latencies) > 10:
                 self._api_latencies.pop(0)
-            
+
             # 레이턴시 한도 초과 확인
             if latency_ms > self.max_api_latency_ms:
                 logger.warning("API 레이턴시 초과: %.0fms > %dms", latency_ms, self.max_api_latency_ms)
-                
+
                 # 연속 3회 초과 시 차단
                 recent_high = sum(1 for l in self._api_latencies[-3:] if l > self.max_api_latency_ms)
                 if recent_high >= 3:
                     self._transition_to_open(f"API 레이턴시 연속 초과: {latency_ms:.0f}ms")
-    
+
     def force_open(self, reason: str = "수동 차단") -> None:
         """수동으로 Circuit Breaker 활성화."""
         with self._lock:
             self._transition_to_open(reason)
-    
+
     def force_close(self) -> None:
         """수동으로 Circuit Breaker 해제."""
         with self._lock:
             self._transition_to_closed()
-    
-    def get_status(self) -> Dict:
+
+    def get_status(self) -> dict:
         """현재 상태 정보 반환."""
         return {
             "state": self.state.value,
@@ -312,7 +311,7 @@ class CircuitBreaker:
             "consecutive_failures": self._consecutive_failures,
             "daily_pnl": self._daily_pnl.get(date.today(), 0.0),
             "avg_latency_ms": (
-                sum(self._api_latencies) / len(self._api_latencies) 
+                sum(self._api_latencies) / len(self._api_latencies)
                 if self._api_latencies else 0
             ),
             "config": {
@@ -326,7 +325,7 @@ class CircuitBreaker:
 
 
 # 싱글톤 인스턴스
-_circuit_breaker: Optional[CircuitBreaker] = None
+_circuit_breaker: CircuitBreaker | None = None
 
 
 def get_circuit_breaker() -> CircuitBreaker:

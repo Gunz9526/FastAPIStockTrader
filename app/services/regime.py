@@ -1,7 +1,7 @@
-from enum import Enum
-import pandas as pd
 import logging
-from typing import Dict, Optional
+from enum import Enum
+
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +16,7 @@ class RegimeDetector:
     """
     여러 지표를 사용해 현재 시장 레짐을 감지합니다.
     """
-    
+
     def __init__(
         self,
         adx_trend_threshold: float = 18.0,  # 15분봉에 맞게 낮춤 (25 → 18)
@@ -28,8 +28,8 @@ class RegimeDetector:
         self.atr_threshold = atr_volatility_threshold
         self.vix_high_threshold = vix_high_threshold
         self.vix_extreme_threshold = vix_extreme_threshold
-    
-    def detect_regime(self, df: pd.DataFrame, vix_value: Optional[float] = None) -> MarketRegime:
+
+    def detect_regime(self, df: pd.DataFrame, vix_value: float | None = None) -> MarketRegime:
         """
         Detect market regime from OHLCV data with indicators.
                 
@@ -43,31 +43,31 @@ class RegimeDetector:
         if df.empty or len(df) < 50:
             logger.warning("레짐 감지용 데이터 부족 (%d개 바), SIDEWAYS_CALM으로 기본 설정", len(df))
             return MarketRegime.SIDEWAYS_CALM
-        
+
         try:
             latest = df.iloc[-1]
-            
+
             close = float(latest.get('close', 0))
             sma_50 = float(latest.get('sma_50', close))
             adx = float(latest.get('adx', 0))
             atr_pct = float(latest.get('atr_pct', 0))
-            
+
             # 가격 모멘텀 계산 (10개 바 = 15분봉 150분)
             if len(df) >= 10:
                 price_change_10d = (close - df['close'].iloc[-10]) / df['close'].iloc[-10]
             else:
                 price_change_10d = 0
-            
+
             # 트렌드 방향
             trend_up = close > sma_50
             strong_trend = adx > self.adx_threshold
             high_volatility = atr_pct > self.atr_threshold
-            
+
             # VIX 기반 변동성 감지 강화
             if vix_value is not None:
                 extreme_fear = vix_value > self.vix_extreme_threshold
                 high_fear = vix_value > self.vix_high_threshold
-                
+
                 # VIX가 ATR보다 우선순위
                 if extreme_fear:
                     high_volatility = True
@@ -77,7 +77,7 @@ class RegimeDetector:
                     logger.info("VIX 높은 공포 감지: %.2f (임계값: %.2f)", vix_value, self.vix_high_threshold)
             else:
                 logger.debug("VIX 미제공, ATR 기반 변동성 감지 사용")
-            
+
             # 레짐 분류 로직 (15분봉 기준)
             if strong_trend and trend_up and price_change_10d > 0.005:  # 150분 내 0.5% 상승
                 regime = MarketRegime.BULL_TRENDING
@@ -87,22 +87,23 @@ class RegimeDetector:
                 regime = MarketRegime.SIDEWAYS_VOLATILE
             else:
                 regime = MarketRegime.SIDEWAYS_CALM
-            
-            logger.info(
-                "레짐 감지: %s (ADX=%.1f, ATR%%=%.3f, VIX=%s, 트렌드=%s)",
-                regime.value, adx, atr_pct, 
-                f"{vix_value:.1f}" if vix_value else 'N/A',
-                'UP' if trend_up else 'DOWN'
-            )
-            
+
+            # 주석처리 (train_model에서 수천 번 호출되므로)
+            # logger.debug(
+            #     "레짐 감지: %s (ADX=%.1f, ATR%%=%.3f, VIX=%s, 트렌드=%s)",
+            #     regime.value, adx, atr_pct,
+            #     f"{vix_value:.1f}" if vix_value else 'N/A',
+            #     'UP' if trend_up else 'DOWN'
+            # )
+
             return regime
-            
+
         except (ValueError, KeyError, AttributeError) as e:
             logger.error("레짐 감지 오류: %s", str(e), exc_info=True)
             return MarketRegime.SIDEWAYS_CALM
 
 # Regime-specific strategy weights
-REGIME_STRATEGY_WEIGHTS: Dict[MarketRegime, Dict[str, float]] = {
+REGIME_STRATEGY_WEIGHTS: dict[MarketRegime, dict[str, float]] = {
     MarketRegime.BULL_TRENDING: {
         'Momentum': 0.5,
         'MeanReversion': 0.1,
@@ -130,7 +131,7 @@ REGIME_STRATEGY_WEIGHTS: Dict[MarketRegime, Dict[str, float]] = {
 }
 
 # Regime-specific risk parameters
-REGIME_RISK_PARAMS: Dict[MarketRegime, Dict[str, float]] = {
+REGIME_RISK_PARAMS: dict[MarketRegime, dict[str, float]] = {
     MarketRegime.BULL_TRENDING: {
         'max_position_pct': 0.15,
         'stop_loss_mult': 2.5,
@@ -157,7 +158,7 @@ REGIME_RISK_PARAMS: Dict[MarketRegime, Dict[str, float]] = {
     }
 }
 
-def get_regime_strategy_weights(regime: MarketRegime) -> Dict[str, float]:
+def get_regime_strategy_weights(regime: MarketRegime) -> dict[str, float]:
     """
     Get strategy weights for current regime.
     
@@ -175,10 +176,10 @@ def get_regime_strategy_weights(regime: MarketRegime) -> Dict[str, float]:
             list(REGIME_STRATEGY_WEIGHTS.keys())
         )
         return REGIME_STRATEGY_WEIGHTS[MarketRegime.SIDEWAYS_CALM]
-    
+
     return REGIME_STRATEGY_WEIGHTS[regime]
 
-def get_regime_risk_params(regime: MarketRegime) -> Dict[str, float]:
+def get_regime_risk_params(regime: MarketRegime) -> dict[str, float]:
     """
     Get risk parameters for current regime.
     
@@ -196,5 +197,5 @@ def get_regime_risk_params(regime: MarketRegime) -> Dict[str, float]:
             list(REGIME_RISK_PARAMS.keys())
         )
         return REGIME_RISK_PARAMS[MarketRegime.SIDEWAYS_CALM]
-    
+
     return REGIME_RISK_PARAMS[regime]

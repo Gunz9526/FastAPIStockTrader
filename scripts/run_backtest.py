@@ -1,7 +1,7 @@
-import sys
-import os
 import argparse
 import logging
+import os
+import sys
 from datetime import datetime, timedelta
 
 # Add project root to path
@@ -18,18 +18,18 @@ def main():
     parser.add_argument("--symbol", type=str, required=True, help="Stock symbol (e.g., AAPL)")
     parser.add_argument("--days", type=int, default=365, help="Backtest days (default: 365)")
     parser.add_argument("--cash", type=float, default=10000.0, help="Initial cash")
-    
+
     args = parser.parse_args()
-    
+
     end_date = datetime.now()
     start_date = end_date - timedelta(days=args.days)
-    
+
     logger.info(f"🚀 Starting Backtest for {args.symbol}")
     logger.info(f"📅 Period: {start_date.date()} ~ {end_date.date()}")
-    
+
     engine = BacktestEngine(initial_cash=args.cash)
     result = engine.run(args.symbol, start_date, end_date)
-    
+
     if result:
         print("\n" + "="*40)
         print(f"📊 BACKTEST RESULT: {result['symbol']}")

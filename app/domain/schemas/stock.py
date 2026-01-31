@@ -1,12 +1,13 @@
-from datetime import datetime, date
-from typing import Optional, List
-from pydantic import BaseModel, ConfigDict, Field
+from datetime import date, datetime
+
+from pydantic import BaseModel, ConfigDict
+
 
 # --- Shared Properties ---
 class StockTickerBase(BaseModel):
     name: str
     market: str
-    sector: Optional[str] = None
+    sector: str | None = None
     is_active: bool = True
 
 class StockOHLCVBase(BaseModel):
@@ -16,9 +17,9 @@ class StockOHLCVBase(BaseModel):
     low: float
     close: float
     volume: float
-    adj_close: Optional[float] = None
-    vwap: Optional[float] = None
-    trade_count: Optional[int] = None
+    adj_close: float | None = None
+    vwap: float | None = None
+    trade_count: int | None = None
 
 class CorporateActionBase(BaseModel):
     action_type: str
@@ -41,12 +42,12 @@ class StockTickerResponse(StockTickerBase):
     symbol: str
     created_at: datetime
     updated_at: datetime
-    
+
     model_config = ConfigDict(from_attributes=True)
 
 class StockOHLCVResponse(StockOHLCVBase):
     symbol: str
-    
+
     model_config = ConfigDict(from_attributes=True)
 
 class CorporateActionResponse(CorporateActionBase):
@@ -58,5 +59,5 @@ class CorporateActionResponse(CorporateActionBase):
 
 # --- Extended Response ---
 class StockTickerDetail(StockTickerResponse):
-    recent_ohlcv: List[StockOHLCVResponse] = []
-    actions: List[CorporateActionResponse] = []
+    recent_ohlcv: list[StockOHLCVResponse] = []
+    actions: list[CorporateActionResponse] = []

@@ -1,9 +1,9 @@
-import logging
 import json
+import logging
+import os
 import uuid
 from datetime import datetime
-import os
-from typing import Dict, Any
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -12,7 +12,7 @@ class TradeDecisionLogger:
     RAG용으로 거래 의사결정 로그를 JSON 파일로 저장합니다.
     형식: logs/trade_decisions/{date}/{symbol}_{uuid}.json
     """
-    
+
     def __init__(self, base_dir: str = "logs/trade_decisions"):
         self.base_dir = base_dir
         self._ensure_dir(self.base_dir)
@@ -21,7 +21,7 @@ class TradeDecisionLogger:
         if not os.path.exists(path):
             os.makedirs(path, exist_ok=True)
 
-    def log_decision(self, symbol: str, action: str, reason: str, metrics: Dict[str, Any]):
+    def log_decision(self, symbol: str, action: str, reason: str, metrics: dict[str, Any]):
         """
         Saves a decision log.
         """
@@ -44,7 +44,7 @@ class TradeDecisionLogger:
 
             with open(filepath, "w", encoding="utf-8") as f:
                 json.dump(log_entry, f, indent=4, ensure_ascii=False)
-            
+
             logger.info(f"{symbol} 거래 결정 로그 저장: {filepath}")
 
         except Exception as e:

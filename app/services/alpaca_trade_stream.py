@@ -8,14 +8,12 @@ Phase E.1: WebSocket을 통한 실시간 주문 상태 추적
 - 빠른 주문 확정 (<1초)
 - 부분 체결, 거부, 취소를 실시간 처리
 """
-import asyncio
 import logging
-from typing import Optional, Callable
+from collections.abc import Callable
 from datetime import datetime
 
-from alpaca.trading.stream import TradingStream
 from alpaca.trading.models import TradeUpdate
-from alpaca.trading.enums import OrderStatus
+from alpaca.trading.stream import TradingStream
 
 from app.core.config import settings
 from app.core.database import get_sync_session
@@ -42,12 +40,12 @@ class AlpacaTradeStream:
     - Lower API usage (WebSocket persistent connection vs repeated GET requests)
     - Better for 15-minute trading (fast order confirmation critical)
     """
-    
+
     def __init__(
         self,
-        on_fill_callback: Optional[Callable] = None,
-        on_reject_callback: Optional[Callable] = None,
-        on_cancel_callback: Optional[Callable] = None
+        on_fill_callback: Callable | None = None,
+        on_reject_callback: Callable | None = None,
+        on_cancel_callback: Callable | None = None
     ):
         """
         Initialize WebSocket client.
@@ -63,16 +61,16 @@ class AlpacaTradeStream:
             paper=settings.ALPACA_PAPER,
             raw_data=False  # Use parsed TradeUpdate objects
         )
-        
+
         self.on_fill_callback = on_fill_callback
         self.on_reject_callback = on_reject_callback
         self.on_cancel_callback = on_cancel_callback
-        
+
         # Subscribe to trade updates
         self.stream.subscribe_trade_updates(self._handle_trade_update)
-        
+
         logger.info("Alpaca Trade Stream 초기화 완료")
-    
+
     async def _handle_trade_update(self, data: TradeUpdate):
         """
         Main handler for all trade update events.
@@ -88,13 +86,13 @@ class AlpacaTradeStream:
             order = data.order
             event = data.event
             symbol = order.symbol
-            
+
             logger.info(
                 f"[WEBSOCKET] {event.upper()}: {order.side} {order.qty} {symbol} "
                 f"@ ${order.filled_avg_price or order.limit_price or 'MARKET'} "
                 f"(상태: {order.status}, 주문ID: {order.id})"
             )
-            
+
             # Handle different event types
             if event == 'fill':
                 await self._handle_fill(data)
@@ -110,25 +108,25 @@ class AlpacaTradeStream:
                 logger.debug(f"주문 대기중: {order.id}")
             else:
                 logger.debug(f"처리되지 않은 이벤트: {event} (주문 {order.id})")
-        
+
         except Exception as e:
             logger.error(f"거래 업데이트 처리 오류: {e}", exc_info=True)
-    
+
     async def _handle_fill(self, data: TradeUpdate):
         """완전 체결된 주문 처리"""
         order = data.order
         position_qty = data.position_qty
-        
+
         logger.info(
             f"주문 체결: {order.side} {order.filled_qty} {order.symbol} "
             f"@ ${order.filled_avg_price:.2f} | "
             f"현재 포지션: {position_qty} 주"
         )
-        
+
         # Update position tracking in database
         with get_sync_session() as db:
             repo = SyncStockRepository(db)
-            
+
             try:
                 # Record in trade_logs table
                 repo.record_trade(
@@ -139,18 +137,18 @@ class AlpacaTradeStream:
                     order_id=order.id,
                     execution_time=datetime.now()
                 )
-                
+
                 logger.info(f"거래가 DB에 기록됨: {order.id}")
             except Exception as e:
                 logger.error(f"거래 기록 실패 {order.id}: {e}")
-        
+
         # Call user callback if provided
         if self.on_fill_callback:
             try:
                 await self.on_fill_callback(data)
             except Exception as e:
                 logger.error(f"Fill 콜백 오류: {e}", exc_info=True)
-    
+
     async def _handle_partial_fill(self, data: TradeUpdate):
         """부분 체결된 주문 처리"""
         order = data.order
@@ -159,10 +157,10 @@ class AlpacaTradeStream:
             f"@ ${order.filled_avg_price:.2f} | "
             f"잔여: {float(order.qty) - float(order.filled_qty)}"
         )
-        
+
         # Note: Position tracking updated when order fully fills
         # Partial fills don't trigger position closure checks
-    
+
     async def _handle_rejection(self, data: TradeUpdate):
         """거부된 주문 처리"""
         order = data.order
@@ -170,14 +168,14 @@ class AlpacaTradeStream:
             f"주문 거부: {order.side} {order.qty} {order.symbol} | "
             f"사유: {order.status} | 주문ID: {order.id}"
         )
-        
+
         # Call user callback if provided
         if self.on_reject_callback:
             try:
                 await self.on_reject_callback(data)
             except Exception as e:
                 logger.error(f"Reject 콜백 오류: {e}", exc_info=True)
-    
+
     async def _handle_cancellation(self, data: TradeUpdate):
         """취소된 주문 처리"""
         order = data.order
@@ -185,14 +183,14 @@ class AlpacaTradeStream:
             f"주문 취소: {order.side} {order.qty} {order.symbol} | "
             f"체결: {order.filled_qty}/{order.qty} | 주문ID: {order.id}"
         )
-        
+
         # Call user callback if provided
         if self.on_cancel_callback:
             try:
                 await self.on_cancel_callback(data)
             except Exception as e:
                 logger.error(f"Cancel 콜백 오류: {e}", exc_info=True)
-    
+
     def start(self):
         """
         Start WebSocket connection (blocking).
@@ -208,7 +206,7 @@ class AlpacaTradeStream:
         except Exception as e:
             logger.error(f"Trade stream 오류: {e}", exc_info=True)
             raise
-    
+
     def stop(self):
         """Stop WebSocket connection gracefully."""
         try:
@@ -219,13 +217,13 @@ class AlpacaTradeStream:
 
 
 # Singleton instance
-_stream_instance: Optional[AlpacaTradeStream] = None
+_stream_instance: AlpacaTradeStream | None = None
 
 
 def get_trade_stream(
-    on_fill_callback: Optional[Callable] = None,
-    on_reject_callback: Optional[Callable] = None,
-    on_cancel_callback: Optional[Callable] = None
+    on_fill_callback: Callable | None = None,
+    on_reject_callback: Callable | None = None,
+    on_cancel_callback: Callable | None = None
 ) -> AlpacaTradeStream:
     """
     Get singleton trade stream instance.

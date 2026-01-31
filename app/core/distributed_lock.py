@@ -35,8 +35,9 @@ Usage:
 """
 import logging
 import time
-from typing import Optional
+
 from redis import Redis
+
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -55,10 +56,10 @@ class DistributedLock:
         This lock is designed for distributed systems (multiple containers).
         For same-process threading, use threading.Lock instead.
     """
-    
+
     # Prefix for all lock keys
     LOCK_PREFIX = "lock:"
-    
+
     def __init__(
         self,
         key: str,
@@ -80,13 +81,13 @@ class DistributedLock:
         self.retry_times = retry_times
         self.retry_delay = retry_delay
         self.acquired = False
-        self._lock_value: Optional[str] = None
-        
+        self._lock_value: str | None = None
+
         # Initialize Redis connection
         # Using sync redis-py (not aioredis) because Celery workers are sync
-        self._redis: Optional[Redis] = None
+        self._redis: Redis | None = None
         self._connect()
-    
+
     def _connect(self) -> None:
         """Establish Redis connection."""
         try:
@@ -97,7 +98,7 @@ class DistributedLock:
         except Exception as e:
             logger.error("Redis connection failed: %s", str(e))
             self._redis = None
-    
+
     def acquire(self) -> bool:
         """
         Attempt to acquire the lock.
@@ -112,11 +113,11 @@ class DistributedLock:
         if self._redis is None:
             logger.warning("Redis not available, proceeding without lock")
             return True  # Fail-open: allow operation if Redis is down
-        
+
         # Generate unique lock value (for safe release)
         import uuid
         self._lock_value = str(uuid.uuid4())
-        
+
         for attempt in range(self.retry_times):
             try:
                 # SET key value NX EX ttl
@@ -128,23 +129,23 @@ class DistributedLock:
                     nx=True,
                     ex=self.ttl_seconds
                 )
-                
+
                 if result:
                     self.acquired = True
                     logger.debug("Lock acquired: %s (attempt %d)", self.key, attempt + 1)
                     return True
-                
+
                 # Lock held by another process, retry
                 if attempt < self.retry_times - 1:
                     time.sleep(self.retry_delay)
-                    
+
             except Exception as e:
                 logger.error("Lock acquire error: %s", str(e))
                 break
-        
+
         logger.warning("Failed to acquire lock: %s after %d attempts", self.key, self.retry_times)
         return False
-    
+
     def release(self) -> bool:
         """
         Release the lock if we own it.
@@ -158,7 +159,7 @@ class DistributedLock:
         """
         if self._redis is None or not self.acquired:
             return False
-        
+
         try:
             # Lua script for atomic check-and-delete
             # Ensures we only delete if we own the lock
@@ -170,7 +171,7 @@ class DistributedLock:
             end
             """
             result = self._redis.eval(lua_script, 1, self.key, self._lock_value)
-            
+
             if result:
                 logger.debug("Lock released: %s", self.key)
                 self.acquired = False
@@ -178,16 +179,16 @@ class DistributedLock:
             else:
                 logger.warning("Lock release failed (not owner): %s", self.key)
                 return False
-                
+
         except Exception as e:
             logger.error("Lock release error: %s", str(e))
             return False
-    
-    def __enter__(self) -> "DistributedLock":
+
+    def __enter__(self) -> DistributedLock:
         """Context manager entry."""
         self.acquire()
         return self
-    
+
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         """Context manager exit - always release lock."""
         if self.acquired:

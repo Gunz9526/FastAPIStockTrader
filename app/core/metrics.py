@@ -1,7 +1,8 @@
 # Prometheus metrics for FastAPI
-from prometheus_client import Counter, Histogram, Gauge, Info, generate_latest
-from fastapi import Response
 import logging
+
+from fastapi import Response
+from prometheus_client import Counter, Gauge, Histogram, Info, generate_latest
 
 logger = logging.getLogger(__name__)
 
@@ -203,7 +204,7 @@ def update_position_metrics(positions: list):
     """
     try:
         open_positions_count.set(len(positions))
-        
+
         for pos in positions:
             symbol = pos.get('symbol', 'UNKNOWN')
             position_value.labels(symbol=symbol).set(pos.get('market_value', 0))
