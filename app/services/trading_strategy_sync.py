@@ -203,9 +203,11 @@ class SyncTradingStrategy:
                 return
 
             # 5. Predict (using regime-aware model if available)
+            # Use legacy feature set (25 features) for existing model compatibility
+            # After retraining, change to feature_set="core" (21 features, no Phase F)
             current_features = features_df.iloc[[-1]]
             scaled_features = self.feature_engineer.extract_feature_vector(
-                current_features, fit_scaler=False
+                current_features, fit_scaler=False, feature_set="legacy"
             )
 
             # Predict next 15-minute return
@@ -238,6 +240,8 @@ class SyncTradingStrategy:
         sell_threshold = config['sell_threshold']
         position_scale = config['position_scale']
         confidence = config['confidence']
+        min_profit_required = config.get('min_profit_required', 0.015)  # Default 1.5%
+        min_hold_multiplier = config.get('min_hold_multiplier', 1.0)  # Default 1x
 
         # sentiment와 fundamentals 가져오기
         sentiment_score, fundamentals = self._get_phase_f_signals(symbol)
@@ -277,18 +281,32 @@ class SyncTradingStrategy:
             if self._has_position(symbol):
                 active_position = self.repo.get_active_position(symbol)
                 if active_position:
+                    # Calculate current profit percentage
+                    entry_price = active_position.entry_price
+                    profit_pct = (current_price - entry_price) / entry_price
+
+                    # Phase H.4: Check regime-specific minimum profit before allowing sell
+                    if profit_pct < min_profit_required and profit_pct > -0.03:  # Allow stop-loss at -3%
+                        logger.info(
+                            "%s SELL 차단: 최소수익 미달 (현재: %.2f%%, 필요: %.2f%%) [%s]",
+                            symbol, profit_pct * 100, min_profit_required * 100, regime_key
+                        )
+                        return
+
+                    # Check RiskManager rules (hold time, etc.)
                     can_exit, reason = self.risk_manager.can_exit_position(
                         symbol=symbol,
-                        entry_price=active_position.entry_price,
+                        entry_price=entry_price,
                         current_price=current_price,
-                        entry_time=active_position.entry_time
+                        entry_time=active_position.entry_time,
+                        hold_multiplier=min_hold_multiplier  # Pass regime-specific multiplier
                     )
 
                     if not can_exit:
                         logger.info("%s SELL 차단: %s", symbol, reason)
                         return
 
-                    logger.info("%s SELL 허용: %s", symbol, reason)
+                    logger.info("%s SELL 허용: %s (수익: %.2f%%)", symbol, reason, profit_pct * 100)
 
                 self._place_order(symbol, "sell", "market", current_price)
             else:
@@ -593,7 +611,9 @@ class SyncTradingStrategy:
                         continue
 
                     latest_features = features_df.iloc[[-1]]
-                    X_norm = self.feature_engineer.extract_feature_vector(latest_features)
+                    X_norm = self.feature_engineer.extract_feature_vector(
+                        latest_features, feature_set="legacy"
+                    )
 
                     # Get prediction with regime awareness
                     prediction = self.predictor.predict_next(X_norm, regime=self.current_regime)

@@ -76,38 +76,52 @@ class Settings(BaseSettings):
 
 # Phase H.4: Regime-Specific Trading Configuration
 # ADR-001: Regime-Specific Trading Thresholds
+#
+# KEY INSIGHT: The model tends to sell too early. Solutions:
+# 1. Higher sell_threshold (more negative) = harder to trigger sell
+# 2. min_hold_multiplier = extend minimum holding time per regime
+# 3. min_profit_required = minimum profit % before allowing sell signal
+#
 REGIME_TRADING_CONFIG = {
     'bull_trending': {
-        'buy_threshold': 0.004,    # 0.4% (conservative, 2x normal)
-        'sell_threshold': -0.001,  # -0.1% (tight stop)
-        'position_scale': 0.3,     # 30% of normal position size
-        'enabled': True,           # Can disable entirely if model unreliable
-        'confidence': 0.3,         # Model confidence weight
-        'description': 'Conservative approach due to poor model performance (49% acc, -0.22 Sharpe)',
+        'buy_threshold': 0.003,    # 0.3% - moderate entry
+        'sell_threshold': -0.005,  # -0.5% - MUCH harder to sell (avoid early exits)
+        'position_scale': 0.5,     # 50% position (balanced risk)
+        'min_hold_multiplier': 2.0,  # 2x normal hold time (120min instead of 60)
+        'min_profit_required': 0.02,  # Require 2% profit before considering sell
+        'enabled': True,
+        'confidence': 0.4,
+        'description': 'Bull markets need patience - extend hold times, avoid early sells',
     },
     'bear_trending': {
-        'buy_threshold': 0.002,    # 0.2% (standard)
-        'sell_threshold': -0.002,  # -0.2% (standard)
-        'position_scale': 0.7,     # 70% (slightly conservative due to high volatility)
-        'enabled': True,
-        'confidence': 0.7,
-        'description': 'Moderate confidence (52.8% acc, 10.5 Sharpe - may be overfit)',
-    },
-    'sideways_volatile': {
-        'buy_threshold': 0.003,    # 0.3% (wider threshold for noise)
-        'sell_threshold': -0.003,  # -0.3%
-        'position_scale': 0.5,     # 50% (reduced due to chop)
+        'buy_threshold': 0.004,    # 0.4% - conservative entry in bearish conditions
+        'sell_threshold': -0.003,  # -0.3% - moderate sell threshold
+        'position_scale': 0.5,     # 50% (risk management in bear market)
+        'min_hold_multiplier': 1.5,  # 1.5x hold time
+        'min_profit_required': 0.015,  # 1.5% profit required
         'enabled': True,
         'confidence': 0.5,
-        'description': 'Moderate caution in choppy markets',
+        'description': 'Bear market - quick profits, moderate holding',
+    },
+    'sideways_volatile': {
+        'buy_threshold': 0.005,    # 0.5% - high threshold for choppy markets
+        'sell_threshold': -0.004,  # -0.4% - harder to sell
+        'position_scale': 0.3,     # 30% (reduced exposure in chop)
+        'min_hold_multiplier': 1.0,  # Normal hold time
+        'min_profit_required': 0.01,  # 1% profit required
+        'enabled': True,
+        'confidence': 0.3,
+        'description': 'Volatile sideways - selective trades only',
     },
     'sideways_calm': {
-        'buy_threshold': 0.002,    # 0.2% (standard)
-        'sell_threshold': -0.002,  # -0.2%
-        'position_scale': 1.0,     # Full position (most reliable regime)
+        'buy_threshold': 0.002,    # 0.2% - normal sensitivity
+        'sell_threshold': -0.004,  # -0.4% - still conservative on sells
+        'position_scale': 1.0,     # Full position (best regime)
+        'min_hold_multiplier': 1.5,  # 1.5x hold time for better profits
+        'min_profit_required': 0.015,  # 1.5% profit required
         'enabled': True,
         'confidence': 0.7,
-        'description': 'High confidence (53.2% acc, 6.5 Sharpe)',
+        'description': 'Calm market - full confidence, patient holding',
     },
 }
 

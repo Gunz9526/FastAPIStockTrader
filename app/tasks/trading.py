@@ -61,9 +61,8 @@ def execute_market_scan():
 def update_trailing_stops():
     """
     트레일링 스톱 업데이트 (동기 버전).
+    NOTE: 현재 비활성화 상태. 포지션이 없으면 조용히 종료.
     """
-    logger.info("트레일링 스톱 업데이트 중 (동기)...")
-
     session = SessionLocal()
     try:
         from sqlalchemy import select
@@ -76,10 +75,11 @@ def update_trailing_stops():
         positions = list(result.scalars().all())
 
         if not positions:
-            logger.info("오픈 포지션 없음")
+            # 포지션 없으면 조용히 종료 (INFO 로그 불필요)
+            logger.debug("트레일링 스톱: 오픈 포지션 없음 - 스킵")
             return
 
-        logger.info("%d개 포지션 업데이트 중", len(positions))
+        logger.info("트레일링 스톱: %d개 포지션 확인 중...", len(positions))
 
         # TODO: 동기 가격 조회 및 트레일링 스톱 로직 구현 필요
         logger.warning("트레일링 스톱 업데이트는 일시 비활성화되어 있습니다 - 동기 리팩토링 필요")

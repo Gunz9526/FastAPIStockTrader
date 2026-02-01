@@ -206,7 +206,8 @@ class FeatureEngineer:
         fit_scaler: bool = False,
         market_avg_volume: float = None,
         sentiment_score: float | None = None,
-        fundamental_data: dict[str, float] | None = None
+        fundamental_data: dict[str, float] | None = None,
+        feature_set: str = "legacy"
     ) -> pd.DataFrame:
         """
         Extract and normalize feature vector for ML model.
@@ -217,6 +218,11 @@ class FeatureEngineer:
             market_avg_volume: Average volume across all symbols (for relative volume)
             sentiment_score: Sentiment score from -1.0 to +1.0 (Phase F.1)
             fundamental_data: Dict with 'pe_ratio', 'pb_ratio', 'roe', etc. (Phase F.2)
+            feature_set: Which feature set to use:
+                - "legacy": 25 features (existing model compatibility)
+                - "core": 21 features (no Phase F, no momentum)
+                - "base": 27 features (with momentum, no Phase F)
+                - "full": 32 features (all features including Phase F)
         
         Returns:
             DataFrame with normalized features ready for model
@@ -234,48 +240,39 @@ class FeatureEngineer:
             else:
                 df.loc[:, 'relative_volume'] = 1.0  # 시장 데이터 없으면 중립값
 
-            # Sentiment 피처 추가 (Phase F.1)
-            if sentiment_score is not None:
-                df.loc[:, 'sentiment_score'] = sentiment_score
-            else:
-                df.loc[:, 'sentiment_score'] = 0.0  # Sentiment 데이터 없으면 중립값
+            # Phase F features - add only when needed by feature_set
+            include_phase_f = feature_set in ("legacy", "full")
+            if include_phase_f:
+                # Sentiment 피처 추가 (Phase F.1)
+                if sentiment_score is not None:
+                    df.loc[:, 'sentiment_score'] = sentiment_score
+                else:
+                    df.loc[:, 'sentiment_score'] = 0.0
 
-            # Fundamentals 피처 추가 (Phase F.2)
-            if fundamental_data is not None:
-                df.loc[:, 'pe_ratio'] = fundamental_data.get('pe_ratio', 15.0)  # 시장 평균 기본값
-                df.loc[:, 'pb_ratio'] = fundamental_data.get('pb_ratio', 3.0)
-                df.loc[:, 'roe'] = fundamental_data.get('roe', 0.10)  # 10% 기본값
-                df.loc[:, 'beta'] = fundamental_data.get('beta', 1.0)  # 시장 베타
-            else:
-                # Fundamentals 데이터 없으면 시장 평균 기본값 사용
-                df.loc[:, 'pe_ratio'] = 15.0
-                df.loc[:, 'pb_ratio'] = 3.0
-                df.loc[:, 'roe'] = 0.10
-                df.loc[:, 'beta'] = 1.0
+                # Fundamentals 피처 추가 (Phase F.2)
+                if fundamental_data is not None:
+                    df.loc[:, 'pe_ratio'] = fundamental_data.get('pe_ratio', 15.0)
+                    df.loc[:, 'pb_ratio'] = fundamental_data.get('pb_ratio', 3.0)
+                    df.loc[:, 'roe'] = fundamental_data.get('roe', 0.10)
+                    df.loc[:, 'beta'] = fundamental_data.get('beta', 1.0)
+                else:
+                    df.loc[:, 'pe_ratio'] = 15.0
+                    df.loc[:, 'pb_ratio'] = 3.0
+                    df.loc[:, 'roe'] = 0.10
+                    df.loc[:, 'beta'] = 1.0
 
-            # Select features for model (exclude OHLCV and date)
-            # Full feature list including Phase H.4 momentum features
-            feature_cols = [
-                # Core technical indicators
-                'rsi', 'macd', 'macd_signal', 'macd_hist',
-                'bb_width', 'bb_position',
-                'sma_20', 'sma_50', 'ema_12', 'ema_26',
-                'atr_pct', 'adx',
-                'stoch_k', 'stoch_d',
-                'volume_ratio', 'roc', 'mom',
-                # Cross-sectional features
-                'sector_id', 'relative_volume',
-                # VWAP & liquidity features
-                'vwap_distance', 'trade_intensity',
-                # Phase H.4: Momentum features for bull regime
-                'momentum_5', 'momentum_10',
-                'rsi_momentum', 'trend_strength',
-                'price_position', 'breakout_flag',
-                # Phase F.1: Sentiment feature
-                'sentiment_score',
-                # Phase F.2: Fundamental features
-                'pe_ratio', 'pb_ratio', 'roe', 'beta',
-            ]
+            # Select features based on feature_set
+            if feature_set == "legacy":
+                feature_cols = self.legacy_feature_columns.copy()
+            elif feature_set == "core":
+                feature_cols = self.core_feature_columns.copy()
+            elif feature_set == "base":
+                feature_cols = self.base_feature_columns.copy()
+            elif feature_set == "full":
+                feature_cols = self.feature_columns.copy()
+            else:
+                logger.warning(f"Unknown feature_set '{feature_set}', using legacy")
+                feature_cols = self.legacy_feature_columns.copy()
 
             # Filter available columns
             available_features = [col for col in feature_cols if col in df.columns]
@@ -356,6 +353,62 @@ class FeatureEngineer:
             DataFrame with indicators (not scaled)
         """
         return self.add_technical_indicators(df)
+
+    @property
+    def legacy_feature_columns(self) -> list:
+        """
+        Return legacy feature columns (25 features) for compatibility with existing models.
+        
+        IMPORTANT: Existing models were trained with 25 features BEFORE Phase H.4 momentum
+        features were added. This list matches the original training data structure.
+        
+        After retraining with new features, switch to base_feature_columns (27 features).
+        
+        Returns:
+            List of 25 legacy feature names (no momentum features, includes Phase F)
+        """
+        return [
+            # Core technical indicators (17)
+            'rsi', 'macd', 'macd_signal', 'macd_hist',
+            'bb_width', 'bb_position',
+            'sma_20', 'sma_50', 'ema_12', 'ema_26',
+            'atr_pct', 'adx',
+            'stoch_k', 'stoch_d',
+            'volume_ratio', 'roc', 'mom',
+            # Cross-sectional features (2)
+            'sector_id', 'relative_volume',
+            # VWAP & liquidity (2)
+            'vwap_distance', 'trade_intensity',
+            # Phase F features (4) - these were included in legacy training
+            'sentiment_score',
+            'pe_ratio', 'pb_ratio', 'roe',
+        ]
+
+    @property
+    def core_feature_columns(self) -> list:
+        """
+        Return core technical features only (21 features).
+        
+        Excludes: Phase F (sentiment/fundamentals) and Phase H.4 (momentum).
+        Use for training/prediction when sentiment and fundamentals should be
+        used as trading reference only, not as ML model inputs.
+        
+        Returns:
+            List of 21 core technical indicator feature names
+        """
+        return [
+            # Core technical indicators (17)
+            'rsi', 'macd', 'macd_signal', 'macd_hist',
+            'bb_width', 'bb_position',
+            'sma_20', 'sma_50', 'ema_12', 'ema_26',
+            'atr_pct', 'adx',
+            'stoch_k', 'stoch_d',
+            'volume_ratio', 'roc', 'mom',
+            # Cross-sectional features (2)
+            'sector_id', 'relative_volume',
+            # VWAP & liquidity (2)
+            'vwap_distance', 'trade_intensity',
+        ]
 
     @property
     def base_feature_columns(self) -> list:

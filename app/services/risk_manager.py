@@ -375,13 +375,14 @@ class RiskManager:
         symbol: str,
         entry_price: float,
         current_price: float,
-        entry_time: datetime
+        entry_time: datetime,
+        hold_multiplier: float = 1.0
     ) -> tuple[bool, str]:
         """
         Check if position can be exited based on defense rules.
         
         Defense Rules:
-        1. Minimum Holding Period: 60 minutes (4 bars)
+        1. Minimum Holding Period: 60 minutes (4 bars) * hold_multiplier
         2. Minimum Profit Threshold: 1.5% (unless hold > 120 min)
         
         CRITICAL: 손절 시(-3% 이하)에는 방어 규칙 무시해야 함!
@@ -392,6 +393,7 @@ class RiskManager:
             entry_price: Position entry price
             current_price: Current market price
             entry_time: Position entry timestamp
+            hold_multiplier: Multiplier for minimum hold time (default 1.0)
         
         Returns:
             (allowed, reason)
@@ -404,9 +406,9 @@ class RiskManager:
         # 손절 시나리오는 항상 허용해야 함 (caller에서 처리)
         # 여기서는 일반 규칙만 체크
 
-        # Rule 1: Minimum holding period (60 minutes)
+        # Rule 1: Minimum holding period (60 minutes * hold_multiplier)
         hold_duration = now - entry_time
-        min_hold_time = timedelta(minutes=self.min_hold_bars * self.bars_per_cycle)
+        min_hold_time = timedelta(minutes=self.min_hold_bars * self.bars_per_cycle * hold_multiplier)
 
         if hold_duration < min_hold_time:
             held_min = int(hold_duration.total_seconds() / 60)

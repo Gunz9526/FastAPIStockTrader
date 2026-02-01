@@ -431,6 +431,83 @@ def _walk_forward_validation_enhanced(
     return results
 
 
+def _save_training_report(regime_results: dict, X: pd.DataFrame) -> str:
+    """
+    Save training results to a text file for model performance evaluation.
+    
+    Args:
+        regime_results: Dict of regime -> metrics
+        X: Feature DataFrame with regime column
+    
+    Returns:
+        Path to saved report file
+    """
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    report_path = f"{MODEL_SAVE_PATH}/training_report_{timestamp}.txt"
+    
+    try:
+        os.makedirs(MODEL_SAVE_PATH, exist_ok=True)
+        
+        with open(report_path, 'w', encoding='utf-8') as f:
+            f.write("=" * 70 + "\n")
+            f.write("MODEL TRAINING REPORT\n")
+            f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write("=" * 70 + "\n\n")
+            
+            # Summary table
+            f.write("REGIME PERFORMANCE SUMMARY\n")
+            f.write("-" * 70 + "\n")
+            f.write(f"{'Regime':<20} {'Samples':<10} {'Accuracy':<12} {'Sharpe':<12} {'Status':<15}\n")
+            f.write("-" * 70 + "\n")
+            
+            for regime, metrics in regime_results.items():
+                samples = metrics.get('samples', 'N/A')
+                accuracy = metrics.get('accuracy', 'N/A')
+                sharpe = metrics.get('sharpe', 'N/A')
+                status = metrics.get('status', 'unknown')
+                
+                acc_str = f"{accuracy:.2%}" if isinstance(accuracy, float) else str(accuracy)
+                sharpe_str = f"{sharpe:.4f}" if isinstance(sharpe, float) else str(sharpe)
+                
+                f.write(f"{regime:<20} {samples:<10} {acc_str:<12} {sharpe_str:<12} {status:<15}\n")
+            
+            f.write("-" * 70 + "\n\n")
+            
+            # Data distribution
+            f.write("DATA DISTRIBUTION BY REGIME\n")
+            f.write("-" * 70 + "\n")
+            if 'regime' in X.columns:
+                regime_counts = X['regime'].value_counts()
+                total_samples = len(X)
+                for regime, count in regime_counts.items():
+                    pct = count / total_samples * 100
+                    f.write(f"{regime}: {count:,} samples ({pct:.1f}%)\n")
+            f.write(f"\nTotal samples: {len(X):,}\n")
+            f.write("-" * 70 + "\n\n")
+            
+            # Detailed metrics for each regime
+            f.write("DETAILED METRICS\n")
+            f.write("-" * 70 + "\n")
+            for regime, metrics in regime_results.items():
+                f.write(f"\n[{regime}]\n")
+                for key, value in metrics.items():
+                    if isinstance(value, float):
+                        f.write(f"  {key}: {value:.4f}\n")
+                    else:
+                        f.write(f"  {key}: {value}\n")
+            
+            f.write("\n" + "=" * 70 + "\n")
+            f.write("END OF REPORT\n")
+            f.write("=" * 70 + "\n")
+        
+        logger.info(f"Training report saved to: {report_path}")
+        return report_path
+        
+    except Exception as e:
+        logger.error(f"Failed to save training report: {e}")
+        return ""
+
+
 @celery_app.task(name="app.tasks.training.train_models", bind=True, max_retries=3)
 @notify_on_failure("train_models")
 def train_models(self):
@@ -484,6 +561,8 @@ def train_models(self):
             logger.info("학습된 모델 검증 (PredictorService 사용)")
             logger.info("="*60)
 
+            regime_results = {}  # Collect results for report
+
             try:
                 # 새로 학습된 모델을 로드하기 위해 predictor 재초기화
                 predictor.reload_models()
@@ -497,6 +576,10 @@ def train_models(self):
 
                     if len(X_regime) < 100:
                         logger.info(f"{regime_value}: 데이터 부족 (샘플 {len(X_regime)}개), 검증 스킵")
+                        regime_results[regime_value] = {
+                            'samples': len(X_regime),
+                            'status': 'insufficient_data'
+                        }
                         continue
 
                     # predictor로 모델 가져오기
@@ -504,6 +587,10 @@ def train_models(self):
                         ensemble = predictor.get_model(regime)
                         if ensemble is None:
                             logger.warning(f"{regime_value}: 모델 파일 없음, 검증 스킵")
+                            regime_results[regime_value] = {
+                                'samples': len(X_regime),
+                                'status': 'no_model'
+                            }
                             continue
 
                         # 검증 데이터로 평가 (최근 20% 사용)
@@ -532,10 +619,27 @@ def train_models(self):
                         logger.info(f"  - 방향 정확도: {accuracy:.2%}")
                         logger.info(f"  - Sharpe Ratio: {sharpe:.4f}")
 
+                        # Collect results for report
+                        regime_results[regime_value] = {
+                            'samples': len(X_regime),
+                            'validation_samples': len(X_val),
+                            'accuracy': accuracy,
+                            'sharpe': sharpe,
+                            'status': 'success'
+                        }
+
                     except Exception as e:
                         logger.error(f"{regime_value} 모델 검증 실패: {e}", exc_info=True)
+                        regime_results[regime_value] = {
+                            'samples': len(X_regime),
+                            'status': 'error',
+                            'error': str(e)
+                        }
 
                 logger.info("="*60 + "\n")
+
+                # Save training report to text file
+                _save_training_report(regime_results, X)
 
             except Exception as e:
                 logger.error(f"모델 검증 중 오류: {e}", exc_info=True)
