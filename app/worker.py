@@ -92,7 +92,7 @@ celery_app.conf.beat_schedule = {
     # Real-time 15-minute OHLCV Collection (Every 15 minutes during market hours)
     "collect_15m_realtime": {
         "task": "app.tasks.realtime_data.collect_15m_realtime",
-        "schedule": crontab(minute="0,15,30,45", hour="9-15", day_of_week="1-5"),
+        "schedule": crontab(minute="0,15,30,45", hour="9-16", day_of_week="1-5"),
     },
 
     # Daily Portfolio Parameter Update (Midnight EST, every day)

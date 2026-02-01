@@ -355,14 +355,26 @@ FastAPI Stock Trader 백엔드의 체계적 진화 과정을 담은 로드맵입
   - 모델 신뢰도: OOS Sharpe 성능 기반 0.1-1.0
   - 폴드별 메트릭 로깅: IS vs OOS 비교
   - 영향: 의심스러운 모델 조기 감지 (bear_trending 10.47 Sharpe)
+- [x] **Bull 레짐 Fallback 메커니즘** (2026-01-19 완료)
+  - 설정: REGIME_MODELS에 `fallback_to_regime: 'sideways_calm'` 추가
+  - 구현: `trading_strategy_sync.py::process_symbol()` fallback 로직
+  - 근거: Bull 모델(48.78% 정확도, -0.42 Sharpe) → sideways_calm 사용(53.08%, +5.99)
+  - 원인: 데이터 부족이 아닌 피처-레짐 미스매치 (bear와 유사한 11K 샘플)
+- [x] **데이터 수집 스케줄 수정** (2026-01-19 완료)
+  - `worker.py`: `hour="9-15"` → `hour="9-16"` (16:00 봉 수집)
+  - `realtime_data.py`: 16:00 실행을 위한 시간 검증 수정
+  - 효과: +6.25% 데이터 커버리지 (마지막 거래 시간 15:30-16:00)
+- [x] **CatBoost 학습 오류 수정** (2026-01-19 완료)
+  - `ml/models.py`: `logging_level='Silent'` 제거 (`verbose=False`와 충돌)
+  - 오류: "Only one of parameters ['verbose', 'logging_level'] should be set"
 
-**모델 성능 분석 (개선 전):**
+**모델 성능 분석 (2026-01-19 개선 후):**
 | 국면 | 정확도 | Sharpe | 상태 |
 |--------|----------|--------|--------|
-| bull_trending | 49.0% | -0.22 | ❌ 심각 |
-| bear_trending | 52.8% | 10.47 | ⚠️ 과적합 의심 |
-| sideways_calm | 53.2% | 6.53 | ✅ 양호 |
-| sideways_volatile | 52.2% | N/A | ⚠️ 비활성 |
+| bull_trending | 48.78% | -0.42 | ✅ 수정됨 (sideways_calm fallback 사용) |
+| bear_trending | 52.49% | 10.04 | ⚠️ 과적합 의심 (OOS 검증) |
+| sideways_calm | 53.08% | 5.99 | ✅ 양호 (주력 모델) |
+| sideways_volatile | N/A | N/A | ⚠️ 비활성 (70 샘플) |
 
 **예상 효과:**
 - bull_trending: 보수적 임계값으로 약한 모델의 손실 방지

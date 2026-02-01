@@ -33,7 +33,7 @@ def collect_15m_realtime():
     day_of_week = current_time.weekday()  # 0=Monday, 6=Sunday
 
     # Market hours: Mon-Fri, 9:30 AM - 4:00 PM ET (14:30-21:00 UTC roughly, but using local)
-    # Simplified check: Hour 9-15 on weekdays
+    # Fixed: Allow hour 16 at minute 0 to capture the 16:00 bar
     if day_of_week > 4:  # Weekend
         logger.info("시장 휴장(주말). 15분 수집 건너뜁니다.")
         return {"status": "skipped", "reason": "weekend"}
@@ -42,7 +42,7 @@ def collect_15m_realtime():
         logger.info("시장 미개장. 15분 수집 건너뜁니다.")
         return {"status": "skipped", "reason": "pre-market"}
 
-    if current_hour >= 16:
+    if current_hour > 16 or (current_hour == 16 and current_minute > 0):
         logger.info("시장 마감 이후. 15분 수집 건너뜁니다.")
         return {"status": "skipped", "reason": "post-market"}
 

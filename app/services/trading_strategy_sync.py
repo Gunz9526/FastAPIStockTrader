@@ -210,8 +210,24 @@ class SyncTradingStrategy:
                 current_features, fit_scaler=False, feature_set="legacy"
             )
 
+            # Check for regime fallback (e.g., bull_trending uses sideways_calm model)
+            prediction_regime = self.current_regime
+            regime_key = self.current_regime.value if self.current_regime else 'sideways_calm'
+            config = self.regime_config.get(regime_key, {})
+            fallback_regime = config.get('fallback_to_regime')
+
+            if fallback_regime:
+                try:
+                    prediction_regime = MarketRegime(fallback_regime)
+                    logger.info(
+                        "%s: %s regime fallback to %s model (better performance)",
+                        symbol, regime_key, fallback_regime
+                    )
+                except ValueError:
+                    logger.warning("Invalid fallback regime: %s", fallback_regime)
+
             # Predict next 15-minute return
-            prediction = self.predictor.predict_next(scaled_features, regime=self.current_regime)
+            prediction = self.predictor.predict_next(scaled_features, regime=prediction_regime)
 
             # 6. Execute Strategy (regime-adjusted)
             self._execute_trade_logic(symbol, prediction, df.iloc[-1]['close'])

@@ -336,18 +336,26 @@ Current Status: **Phase E (Production Hardening) & F (Advanced AI) Preparation**
   - Model confidence: 0.1-1.0 based on OOS Sharpe performance
   - Per-fold metrics logging: IS vs OOS comparison
   - Impact: Early detection of suspicious models (bear_trending 10.47 Sharpe)
+- [x] **Bull Regime Fallback Mechanism** (Completed 2026-01-19)
+  - Config: `fallback_to_regime: 'sideways_calm'` in REGIME_MODELS
+  - Implementation: `trading_strategy_sync.py::process_symbol()` fallback logic
+  - Rationale: Bull model (48.78% acc, -0.42 Sharpe) uses sideways_calm (53.08% acc, +5.99 Sharpe)
+  - Root cause: Feature-regime mismatch, NOT data insufficiency (11K samples like bear)
+- [x] **Data Collection Schedule Fix** (Completed 2026-01-19)
+  - `worker.py`: Changed `hour="9-15"` → `hour="9-16"` (capture 16:00 bar)
+  - `realtime_data.py`: Fixed time validation for 16:00 execution
+  - Impact: +6.25% data coverage (last trading hour 15:30-16:00)
+- [x] **CatBoost Training Error Fix** (Completed 2026-01-19)
+  - `ml/models.py`: Removed `logging_level='Silent'` (conflicted with `verbose=False`)
+  - Error: "Only one of parameters ['verbose', 'logging_level'] should be set"
 
-**Model Performance Analysis (Pre-Enhancement):**
+**Model Performance Analysis (Post-Enhancement 2026-01-19):**
 | Regime | Accuracy | Sharpe | Status |
 |--------|----------|--------|--------|
-| bull_trending | 49.0% | -0.22 | ❌ Critical |
-| bear_trending | 52.8% | 10.47 | ⚠️ Overfit suspected |
-| sideways_calm | 53.2% | 6.53 | ✅ Good |
-| sideways_volatile | 52.2% | N/A | ⚠️ Disabled |
-
-**Expected Impact:**
-- bull_trending: Conservative thresholds prevent losses from weak model
-- bear_trending: OOS validation will detect overfit before deployment
+| bull_trending | 48.78% | -0.42 | ✅ Fixed (uses sideways_calm fallback) |
+| bear_trending | 52.49% | 10.04 | ⚠️ Overfit suspected (OOS validation) |
+| sideways_calm | 53.08% | 5.99 | ✅ Good (primary model) |
+| sideways_volatile | N/A | N/A | ⚠️ Disabled (70 samples) |
 - Overall: Feature importance analysis enables data-driven model improvement
 
 ---

@@ -170,10 +170,9 @@ def _load_and_prepare_data(
             # Load VIX data from Redis cache for regime detection
             vix_value = None
             try:
-                from app.core.cache import cache
-                vix_cached = cache.get("vix:latest")
-                if vix_cached:
-                    vix_value = float(vix_cached)
+                from app.tasks.vix_data import get_latest_vix
+                vix_value = get_latest_vix()
+                if vix_value is not None:
                     logger.info("VIX 캐시에서 로드: %.2f", vix_value)
                 else:
                     logger.warning("VIX 캐시 없음 (ATR 기반 레짐 감지 사용)")

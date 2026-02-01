@@ -208,9 +208,9 @@ class EnsembleWrapper(ModelWrapper):
         xgb_p = self.model_params.get('xgboost', {})
 
         # Ensure verbosity control for all models
+        # Note: CatBoost only allows ONE of: verbose, logging_level, verbose_eval, silent
         cat_p.setdefault('verbose', False)
         cat_p.setdefault('allow_writing_files', False)
-        cat_p.setdefault('logging_level', 'Silent')
         lgbm_p.setdefault('verbose', -1)
         xgb_p.setdefault('verbosity', 0)
 

@@ -74,13 +74,16 @@ class Settings(BaseSettings):
     )
 
 
-# Phase H.4: Regime-Specific Trading Configuration
-# ADR-001: Regime-Specific Trading Thresholds
+# Regime-Specific Trading Configuration
+# Regime-Specific Trading Thresholds
 #
 # KEY INSIGHT: The model tends to sell too early. Solutions:
 # 1. Higher sell_threshold (more negative) = harder to trigger sell
 # 2. min_hold_multiplier = extend minimum holding time per regime
 # 3. min_profit_required = minimum profit % before allowing sell signal
+#
+# BULL_TRENDING NOTE: Model accuracy is 48.78% (below 50%) with -0.42 Sharpe.
+# Use fallback_to_regime to use sideways_calm model instead when bull is detected.
 #
 REGIME_TRADING_CONFIG = {
     'bull_trending': {
@@ -91,6 +94,7 @@ REGIME_TRADING_CONFIG = {
         'min_profit_required': 0.02,  # Require 2% profit before considering sell
         'enabled': True,
         'confidence': 0.4,
+        'fallback_to_regime': 'sideways_calm',  # Use sideways_calm model (better performance)
         'description': 'Bull markets need patience - extend hold times, avoid early sells',
     },
     'bear_trending': {
