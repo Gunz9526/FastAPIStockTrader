@@ -9,6 +9,8 @@ from app.ml.predictor import PredictorService
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+_MODEL_PATH = os.getenv("MODEL_SAVE_PATH", "model_artifacts")
+
 @router.get("/metrics", response_model=Dict[str, Any])
 async def get_model_metrics():
     """
@@ -35,7 +37,7 @@ async def get_model_metrics():
             )
         
         # Load metadata file if available
-        metadata_path = "/app/model_artifacts/ensemble_model_metadata.json"
+        metadata_path = os.path.join(_MODEL_PATH, "ensemble_model_metadata.json")
         if os.path.exists(metadata_path):
             with open(metadata_path, 'r') as f:
                 file_metadata = json.load(f)
@@ -68,15 +70,15 @@ async def get_model_info():
         - 모델 파일 상태 정보
     """
     try:
-        metadata_path = "/app/model_artifacts/ensemble_model_metadata.json"
-        model_path = "/app/model_artifacts/ensemble_model.pkl"
-        scaler_path = "/app/model_artifacts/feature_scaler.pkl"
+        metadata_path = os.path.join(_MODEL_PATH, "ensemble_model_metadata.json")
+        model_path = os.path.join(_MODEL_PATH, "ensemble_model.pkl")
+        scaler_path = os.path.join(_MODEL_PATH, "feature_scaler.pkl")
         
         return {
             "model_exists": os.path.exists(model_path),
             "scaler_exists": os.path.exists(scaler_path),
             "metadata_exists": os.path.exists(metadata_path),
-            "artifacts_path": "/app/model_artifacts"
+            "artifacts_path": _MODEL_PATH
         }
         
     except Exception as e:

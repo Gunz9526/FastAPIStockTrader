@@ -35,9 +35,19 @@ Before marking task complete:
 4. Test coverage meets minimum threshold
 5. All tests pass locally
 6. No unused test fixtures or imports
+7. Ternary classification outputs verified (class, confidence, probabilities)
+8. Feature count matches between training and inference (27 base features)
 
 ## TEST CATEGORIES
 - **Unit Tests**: Test individual functions/classes in isolation
 - **Integration Tests**: Test component interactions (DB, Redis, APIs)
 - **Regression Tests**: Verify bug fixes don't reappear
 - **Smoke Tests**: Basic sanity checks for critical paths
+
+## ML CLASSIFICATION TESTING (MANDATORY)
+- **Ternary Classification Pipeline**: Test `predict_class()` returns valid class (0/1/2), confidence (0.0–1.0), and probabilities (3-element array summing to 1.0)
+- **Class Weights**: Verify class weight balancing handles imbalanced datasets correctly
+- **Confidence Thresholds**: Test regime-specific thresholds (0.40–0.60) produce correct BUY/SELL/HOLD signals
+- **Feature Count Consistency**: Verify 27 base features match between training and inference pipelines
+- **VotingClassifier**: Test soft voting ensemble produces valid probability outputs
+- **Daily Bar Data**: Ensure all test fixtures use `'1d'` timeframe data, no 15-minute references

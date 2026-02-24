@@ -2,6 +2,8 @@ import logging
 from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
 
+from app.core.cache import cache
+
 logger = logging.getLogger(__name__)
 
 class RiskManager:
@@ -52,12 +54,16 @@ class RiskManager:
         self.positions: dict[str, dict] = {}
 
         # Defense mechanisms
-        self.position_entry_times: dict[str, datetime] = {}  # In-memory cache
-        self.symbol_cooldowns: dict[str, datetime] = {}      # Redis-backed (future)
-        self.min_hold_bars = 4                                # 60min (15m x 4 bars)
+        self.position_entry_times: dict[str, datetime] = {}  # In-memory fallback
+        self.symbol_cooldowns: dict[str, datetime] = {}      # In-memory fallback
+        self.min_hold_bars = 2                                # 2 trading days (daily bars)
         self.min_profit_pct = 0.015                           # 1.5% (5x transaction cost)
-        self.cooldown_bars = 4                                # 60min cooldown
-        self.bars_per_cycle = 15                              # 15 minutes per bar
+        self.cooldown_bars = 1                                # 1 day cooldown
+        self.bars_per_cycle = 1440                            # 1440 minutes per daily bar
+
+        # Redis key prefixes & TTLs
+        self._cooldown_ttl_seconds: int = self.cooldown_bars * self.bars_per_cycle * 60
+        self._entry_time_ttl_seconds: int = 86400 * 7  # 7 days (daily trading)
 
     def _reset_if_new_day(self):
         """Reset daily counters if new trading day."""
@@ -347,26 +353,46 @@ class RiskManager:
     def can_enter_position(self, symbol: str) -> tuple[bool, str]:
         """
         Check if symbol is allowed to enter (cooldown period check).
-        
+
         Defense Rule:
         - After exiting a position, enforce cooldown period (default 60 min)
         - Prevents rapid re-trading of same symbol (whipsaw protection)
-        
+        - Cooldown state is persisted in Redis (survives restarts)
+
         Args:
             symbol: Stock symbol
-        
+
         Returns:
-            (allowed, reason)
+            Tuple of (allowed, reason).
         """
-        if symbol in self.symbol_cooldowns:
+        cooldown_end: datetime | None = None
+
+        # 1) Try Redis first
+        try:
+            if cache.enabled:
+                raw: str | None = cache.get(f"risk:cooldown:{symbol}")
+                if raw is not None:
+                    cooldown_end = datetime.fromisoformat(str(raw))
+        except Exception as e:
+            logger.warning(f"Redis read failed for cooldown:{symbol}: {e}")
+
+        # 2) Fallback to in-memory dict
+        if cooldown_end is None and symbol in self.symbol_cooldowns:
             cooldown_end = self.symbol_cooldowns[symbol]
-            now = datetime.now(UTC)  # timezone-aware
+
+        if cooldown_end is not None:
+            now = datetime.now(UTC)
             if now < cooldown_end:
                 remaining_min = int((cooldown_end - now).total_seconds() / 60)
                 return False, f"COOLDOWN: {remaining_min}분 남음 (종료 {cooldown_end.strftime('%H:%M')})"
             else:
-                # Cooldown expired, remove from dict
-                del self.symbol_cooldowns[symbol]
+                # Cooldown expired — clean up both stores
+                self.symbol_cooldowns.pop(symbol, None)
+                try:
+                    if cache.enabled:
+                        cache.delete(f"risk:cooldown:{symbol}")
+                except Exception as e:
+                    logger.warning(f"Redis delete failed for cooldown:{symbol}: {e}")
 
         return True, "OK"
 
@@ -382,8 +408,8 @@ class RiskManager:
         Check if position can be exited based on defense rules.
         
         Defense Rules:
-        1. Minimum Holding Period: 60 minutes (4 bars) * hold_multiplier
-        2. Minimum Profit Threshold: 1.5% (unless hold > 120 min)
+        1. Minimum Holding Period: 2 trading days * hold_multiplier
+        2. Minimum Profit Threshold: 1.5% (unless hold > 4 days)
         
         CRITICAL: 손절 시(-3% 이하)에는 방어 규칙 무시해야 함!
         이 함수는 일반적인 방어 규칙만 체크. 손절 로직은 caller에서 처리.
@@ -424,52 +450,97 @@ class RiskManager:
             if profit_pct <= -0.03:
                 return True, f"STOP_LOSS: {profit_pct:.2%}"
 
-            # Allow exit after 8 bars (120 minutes) even if unprofitable
-            max_hold_time = timedelta(minutes=8 * self.bars_per_cycle)
+            # Allow exit after 4 bars (4 trading days) even if unprofitable
+            max_hold_time = timedelta(minutes=4 * self.bars_per_cycle)
             if hold_duration < max_hold_time:
                 return False, f"MIN_PROFIT: {profit_pct:.2%} < 1.5% (hold {int(hold_duration.total_seconds()/60)}min)"
 
         return True, f"OK (profit: {profit_pct:.2%}, hold: {int(hold_duration.total_seconds()/60)}min)"
 
-    def record_position_entry(self, symbol: str, entry_time: datetime):
+    def record_position_entry(self, symbol: str, entry_time: datetime) -> None:
         """
         Record position entry for hold period tracking.
-        
+
+        Persists entry time to Redis (TTL 24h) with in-memory fallback.
+
         Args:
             symbol: Stock symbol
             entry_time: Entry timestamp
         """
+        # In-memory fallback always kept in sync
         self.position_entry_times[symbol] = entry_time
+
+        # Persist to Redis
+        try:
+            if cache.enabled:
+                cache.set(
+                    f"risk:entry_time:{symbol}",
+                    entry_time.isoformat(),
+                    ttl_seconds=self._entry_time_ttl_seconds,
+                )
+        except Exception as e:
+            logger.warning(f"Redis set failed for entry_time:{symbol}: {e}")
+
         logger.info(f"📍 Position entry recorded: {symbol} @ {entry_time.strftime('%H:%M:%S')}")
 
-    def record_position_exit(self, symbol: str):
+    def record_position_exit(self, symbol: str) -> None:
         """
         Record position exit and start cooldown period.
-        
+
+        Removes entry time and sets cooldown in both Redis and in-memory.
+
         Args:
             symbol: Stock symbol
         """
-        # Remove from active positions
-        if symbol in self.position_entry_times:
-            del self.position_entry_times[symbol]
+        # Remove entry time from both stores
+        self.position_entry_times.pop(symbol, None)
+        try:
+            if cache.enabled:
+                cache.delete(f"risk:entry_time:{symbol}")
+        except Exception as e:
+            logger.warning(f"Redis delete failed for entry_time:{symbol}: {e}")
 
         # Start cooldown
         cooldown_duration = timedelta(minutes=self.cooldown_bars * self.bars_per_cycle)
         cooldown_end = datetime.now(UTC) + cooldown_duration  # timezone-aware
+
+        # In-memory fallback
         self.symbol_cooldowns[symbol] = cooldown_end
+
+        # Persist to Redis with auto-expiry
+        try:
+            if cache.enabled:
+                cache.set(
+                    f"risk:cooldown:{symbol}",
+                    cooldown_end.isoformat(),
+                    ttl_seconds=self._cooldown_ttl_seconds,
+                )
+        except Exception as e:
+            logger.warning(f"Redis set failed for cooldown:{symbol}: {e}")
 
         logger.info(f"🚫 {symbol} cooldown: {self.cooldown_bars * self.bars_per_cycle}min (until {cooldown_end.strftime('%H:%M')}")
 
     def get_position_entry_time(self, symbol: str) -> datetime | None:
         """
-        Get position entry time from memory cache.
-        
-        Note: This is in-memory only. For persistence, query DB.
-        
+        Get position entry time from Redis (with in-memory fallback).
+
         Args:
             symbol: Stock symbol
-        
+
         Returns:
-            Entry time or None if not found
+            Entry time or None if not found.
         """
+        # 1) Try Redis first
+        try:
+            if cache.enabled:
+                raw: str | None = cache.get(f"risk:entry_time:{symbol}")
+                if raw is not None:
+                    entry_time = datetime.fromisoformat(str(raw))
+                    # Sync back to in-memory for fast subsequent reads
+                    self.position_entry_times[symbol] = entry_time
+                    return entry_time
+        except Exception as e:
+            logger.warning(f"Redis read failed for entry_time:{symbol}: {e}")
+
+        # 2) Fallback to in-memory dict
         return self.position_entry_times.get(symbol, None)

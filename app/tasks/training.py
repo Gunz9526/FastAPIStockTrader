@@ -3,16 +3,23 @@ import logging
 import os
 from datetime import datetime, timedelta
 
+import numpy as np
 import optuna
 import pandas as pd
+from sklearn.metrics import accuracy_score, classification_report, f1_score
 from sklearn.model_selection import TimeSeriesSplit
 
 from app.core.database import SessionLocal
 from app.ml.features import FeatureEngineer
-from app.ml.models import CatBoostWrapper, LGBMWrapper, XGBoostWrapper
-from app.ml.predictor import PredictorService
+from app.ml.models import (
+    CLASS_NAMES,
+    CatBoostClassifierWrapper,
+    EnsembleClassifierWrapper,
+    LGBMClassifierWrapper,
+    XGBoostClassifierWrapper,
+)
 from app.repositories.stock_repo_sync import SyncStockRepository
-from app.services.discord_notifier import discord_notifier, notify_on_failure
+from app.services.discord_notifier import notify_on_failure
 from app.services.regime import MarketRegime, RegimeDetector
 from app.worker import celery_app
 
@@ -23,12 +30,19 @@ LOOKBACK_YEARS = 2
 VALIDATION_DAYS = 30
 MODEL_SAVE_PATH = "model_artifacts"
 
-# Walk-Forward Validation Periods (in days)
-WALK_FORWARD_PERIODS = [
-    (90, 60),  # 90~60 days ago
-    (60, 30),  # 60~30 days ago
-    (30, 0),   # 30~0 days ago (most recent)
-]
+# Ternary classification threshold (daily return)
+# Returns above +THRESHOLD → UP(2), below -THRESHOLD → DOWN(0), else NEUTRAL(1)
+CLASSIFICATION_THRESHOLD = 0.005  # ±0.5% daily — wider NEUTRAL band to reduce noise trades
+
+# Regime-specific class weight overrides
+# Addresses: UP over-prediction (all regimes), NEUTRAL collapse (bear_trending)
+REGIME_CLASS_WEIGHTS: dict[str, dict[int, float]] = {
+    "bull_trending":      {0: 1.3, 1: 1.2, 2: 1.0},  # Reduce UP bias, slightly boost NEUTRAL
+    "bear_trending":      {0: 1.0, 1: 1.5, 2: 1.3},  # Strongly boost NEUTRAL (was 7/64 = 11%)
+    "sideways_volatile":  {0: 1.2, 1: 1.3, 2: 1.0},  # Reduce UP, boost NEUTRAL
+    "sideways_calm":      {0: 1.2, 1: 1.3, 2: 1.0},  # Reduce UP (2775 vs 1739), boost NEUTRAL
+}
+
 
 def _load_and_prepare_data(
     repo: SyncStockRepository,
@@ -88,9 +102,15 @@ def _load_and_prepare_data(
                 logger.warning(f"{symbol}: Feature engineering failed")
                 continue
 
-            # Target: Next bar return
-            features_df['target'] = features_df['close'].pct_change().shift(-1)
+            # Target: Ternary classification (daily return)
+            # 0=DOWN (< -0.3%), 1=NEUTRAL (-0.3% ~ +0.3%), 2=UP (> +0.3%)
+            next_return = features_df['close'].pct_change().shift(-1)
+            features_df['target'] = np.where(
+                next_return > CLASSIFICATION_THRESHOLD, 2,   # UP
+                np.where(next_return < -CLASSIFICATION_THRESHOLD, 0, 1)  # DOWN / NEUTRAL
+            )
             features_df.dropna(inplace=True)
+            features_df['target'] = features_df['target'].astype(int)
 
             # Add relative_volume (market-relative volume)
             # Note: Using symbol-level average as approximation for market average
@@ -134,13 +154,13 @@ def _load_and_prepare_data(
 
         # SPY 데이터 로드 (regime classification용)
         try:
-            # SPY 15분봉 데이터 확인
-            spy_ohlcv = repo.get_ohlcv_range('SPY', start_date, end_date, timeframe='15m')
+            # SPY 일봉 데이터 확인
+            spy_ohlcv = repo.get_ohlcv_range('SPY', start_date, end_date, timeframe='1d')
 
             # SPY 데이터 부족 시 경고
             if len(spy_ohlcv) < 100:
                 logger.warning(
-                    "SPY 15분봉 데이터 부족 (%d bars). SPY를 symbol_subset에 추가하여 백필하세요.",
+                    "SPY 일봉 데이터 부족 (%d bars). SPY를 symbol_subset에 추가하여 백필하세요.",
                     len(spy_ohlcv)
                 )
 
@@ -183,25 +203,40 @@ def _load_and_prepare_data(
             if len(spy_features) >= 50:
                 logger.info("시계열별 rolling window regime 분류 시작...")
 
-                # 각 샘플의 시점까지의 SPY 데이터로 regime 분류
-                regimes = []
-                for idx, timestamp in enumerate(X.index):
-                    # 해당 시점까지의 SPY 데이터 (최근 200개 윈도우)
-                    spy_window = spy_features[spy_features.index <= timestamp].tail(200)
-
-                    if len(spy_window) >= 50:
-                        regime = regime_detector.detect_regime(spy_window, vix_value=vix_value)
-                        regimes.append(regime.value)
+                # Pre-compute regime for each SPY bar (vectorized approach)
+                # Instead of O(N*M) per-sample detection, compute regime per SPY bar: O(M)
+                spy_regimes = []
+                spy_timestamps = spy_features.index.tolist()
+                for i in range(len(spy_features)):
+                    if i >= 49:  # Need at least 50 bars
+                        window = spy_features.iloc[max(0, i - 199):i + 1]
+                        regime = regime_detector.detect_regime(window, vix_value=vix_value)
+                        spy_regimes.append(regime.value)
                     else:
-                        # 초기 데이터 부족 시 기본값
-                        regimes.append(MarketRegime.SIDEWAYS_CALM.value)
+                        spy_regimes.append(MarketRegime.SIDEWAYS_CALM.value)
 
-                    # 진행 상황 로깅 (10% 단위)
-                    if (idx + 1) % (len(X) // 10) == 0:
-                        logger.info("Regime 분류 진행: %d/%d (%.1f%%)", idx + 1, len(X), (idx + 1) / len(X) * 100)
+                logger.info("SPY 레짐 사전 계산 완료: %d개 바", len(spy_regimes))
 
-                X['regime'] = regimes
-                logger.info("시계열별 regime 분류 완료: %d개 샘플", len(regimes))
+                # Build SPY regime Series with datetime index
+                spy_regime_series = pd.DataFrame({
+                    'timestamp': spy_timestamps,
+                    'regime': spy_regimes
+                }).set_index('timestamp').sort_index()
+
+                # Map training samples to nearest SPY regime via asof merge
+                X_temp = pd.DataFrame({'timestamp': X.index}).sort_values('timestamp')
+                merged = pd.merge_asof(
+                    X_temp,
+                    spy_regime_series.reset_index(),
+                    on='timestamp',
+                    direction='backward'
+                )
+                # Restore original index order
+                merged.index = X_temp.index
+                X['regime'] = merged['regime'].fillna(MarketRegime.SIDEWAYS_CALM.value).values
+
+                regime_dist = X['regime'].value_counts().to_dict()
+                logger.info("벡터화 regime 분류 완료: %d개 샘플, 분포: %s", len(X), regime_dist)
             else:
                 logger.warning("SPY features 부족 (%d개), SIDEWAYS_CALM으로 설정", len(spy_features))
                 X['regime'] = MarketRegime.SIDEWAYS_CALM.value
@@ -215,219 +250,6 @@ def _load_and_prepare_data(
 
     logger.info("총 %d개 샘플, %d개 심볼로부터 데이터 로드 완료", len(X), len(successful_symbols))
     return X, y, successful_symbols
-
-def _walk_forward_validation(
-    model_wrapper,
-    X: pd.DataFrame,
-    y: pd.Series,
-    feature_engineer: FeatureEngineer,
-    end_date: pd.Timestamp
-) -> float:
-    """
-    Walk-Forward validation across multiple time periods.
-    
-    Args:
-        model_wrapper: Initialized model (CatBoost/LGBM/XGBoost)
-        X: Feature DataFrame with datetime index
-        y: Target Series
-        feature_engineer: For scaling
-        end_date: Reference end date
-    
-    Returns:
-        Average Sharpe ratio across all validation periods
-    """
-    sharpe_scores = []
-
-    for period_idx, (val_start_days, val_end_days) in enumerate(WALK_FORWARD_PERIODS):
-        val_start = end_date - timedelta(days=val_start_days)
-        val_end = end_date - timedelta(days=val_end_days)
-
-        # Split data
-        train_mask = (X.index < val_start)
-        val_mask = (X.index >= val_start) & (X.index < val_end)
-
-        X_train_period = X[train_mask]
-        y_train_period = y[train_mask]
-        X_val_period = X[val_mask]
-        y_val_period = y[val_mask]
-
-        if len(X_val_period) < 50:  # Minimum validation samples
-            logger.warning(f"Period {period_idx + 1}: Too few validation samples ({len(X_val_period)})")
-            continue
-
-        # Scale
-        X_train_scaled = feature_engineer.extract_feature_vector(X_train_period, fit_scaler=True)
-        X_val_scaled = feature_engineer.extract_feature_vector(X_val_period, fit_scaler=False)
-
-        # Train and predict
-        model_wrapper.train(X_train_scaled, y_train_period)
-        predictions = model_wrapper.predict(X_val_scaled)
-
-        # Calculate Sharpe
-        pred_dir = (predictions > 0).astype(int) * 2 - 1
-        returns = y_val_period.values * pred_dir
-        sharpe = returns.mean() / (returns.std() + 1e-8) * ((252 * 26) ** 0.5)
-        sharpe_scores.append(sharpe)
-
-        logger.info(f"Period {period_idx + 1} ({val_start_days}-{val_end_days} days ago): Sharpe={sharpe:.4f}")
-
-    if not sharpe_scores:
-        logger.error("No valid validation periods")
-        return 0.0
-
-    avg_sharpe = sum(sharpe_scores) / len(sharpe_scores)
-    logger.info(f"Walk-Forward Average Sharpe: {avg_sharpe:.4f}")
-    return avg_sharpe
-
-
-def _walk_forward_validation_enhanced(
-    ensemble_model,
-    X: pd.DataFrame,
-    y: pd.Series,
-    feature_engineer: FeatureEngineer,
-    regime: str,
-    n_splits: int = 3
-) -> dict:
-    """
-    Enhanced Walk-Forward Out-of-Sample validation for overfitting detection.
-
-    Phase H.4: Provides detailed OOS metrics to detect regime model overfitting.
-
-    Args:
-        ensemble_model: Trained ensemble model
-        X: Feature DataFrame (scaled)
-        y: Target Series
-        feature_engineer: For any additional scaling
-        regime: Regime name for logging
-        n_splits: Number of walk-forward periods
-
-    Returns:
-        Dictionary with detailed validation results:
-        {
-            'regime': str,
-            'in_sample_sharpe': float,
-            'oos_sharpe': float,
-            'oos_accuracy': float,
-            'overfit_ratio': float,  # OOS/IS ratio (< 0.5 indicates overfit)
-            'is_overfit': bool,
-            'periods': list[dict],
-            'model_confidence': float,
-        }
-    """
-    from sklearn.model_selection import TimeSeriesSplit
-
-    results = {
-        'regime': regime,
-        'periods': [],
-        'in_sample_sharpe': 0.0,
-        'oos_sharpe': 0.0,
-        'oos_accuracy': 0.0,
-        'overfit_ratio': 0.0,
-        'is_overfit': False,
-        'model_confidence': 0.5,
-    }
-
-    tscv = TimeSeriesSplit(n_splits=n_splits)
-    oos_sharpes = []
-    oos_accuracies = []
-    is_sharpes = []
-
-    for fold, (train_idx, val_idx) in enumerate(tscv.split(X)):
-        X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
-        y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
-
-        if len(X_val) < 30:
-            logger.warning(f"{regime} Fold {fold+1}: Too few OOS samples ({len(X_val)})")
-            continue
-
-        try:
-            # Train a fresh model copy for IS evaluation
-            from app.ml.models import EnsembleWrapper
-            fold_model = EnsembleWrapper()
-            fold_model.train(X_train, y_train)
-
-            # In-sample prediction
-            is_pred = fold_model.predict(X_train)
-            is_dir = (is_pred > 0).astype(int) * 2 - 1
-            is_returns = y_train.values * is_dir
-            is_sharpe = is_returns.mean() / (is_returns.std() + 1e-8) * ((252 * 26) ** 0.5)
-            is_sharpes.append(is_sharpe)
-
-            # Out-of-sample prediction
-            oos_pred = fold_model.predict(X_val)
-            oos_dir = (oos_pred > 0).astype(int) * 2 - 1
-            oos_returns = y_val.values * oos_dir
-            oos_sharpe = oos_returns.mean() / (oos_returns.std() + 1e-8) * ((252 * 26) ** 0.5)
-            oos_sharpes.append(oos_sharpe)
-
-            # Direction accuracy
-            actual_dir = (y_val.values > 0).astype(int) * 2 - 1
-            accuracy = (oos_dir == actual_dir).mean()
-            oos_accuracies.append(accuracy)
-
-            period_result = {
-                'fold': fold + 1,
-                'train_samples': len(X_train),
-                'val_samples': len(X_val),
-                'in_sample_sharpe': round(is_sharpe, 4),
-                'oos_sharpe': round(oos_sharpe, 4),
-                'oos_accuracy': round(accuracy, 4),
-            }
-            results['periods'].append(period_result)
-
-            logger.info(
-                f"{regime} Fold {fold+1}: IS Sharpe={is_sharpe:.4f}, "
-                f"OOS Sharpe={oos_sharpe:.4f}, OOS Acc={accuracy:.2%}"
-            )
-
-        except Exception as e:
-            logger.error(f"{regime} Fold {fold+1} validation failed: {e}")
-
-    if not oos_sharpes:
-        logger.error(f"{regime}: No valid OOS validation results")
-        return results
-
-    # Calculate aggregated metrics
-    avg_is_sharpe = sum(is_sharpes) / len(is_sharpes)
-    avg_oos_sharpe = sum(oos_sharpes) / len(oos_sharpes)
-    avg_oos_accuracy = sum(oos_accuracies) / len(oos_accuracies)
-
-    # Overfit detection
-    if avg_is_sharpe > 0:
-        overfit_ratio = avg_oos_sharpe / avg_is_sharpe
-    else:
-        overfit_ratio = 1.0 if avg_oos_sharpe >= 0 else 0.0
-
-    is_overfit = (overfit_ratio < 0.3) or (avg_is_sharpe > 5 and avg_oos_sharpe < 1)
-
-    # Model confidence calculation
-    # Based on: OOS Sharpe, accuracy, and overfit ratio
-    confidence = 0.5  # Base confidence
-    if avg_oos_sharpe > 0:
-        confidence += min(0.2, avg_oos_sharpe / 10)  # Up to +0.2 for positive Sharpe
-    if avg_oos_accuracy > 0.52:
-        confidence += 0.1  # Bonus for > 52% accuracy
-    if not is_overfit:
-        confidence += 0.1  # Bonus for no overfitting
-    confidence = min(1.0, max(0.1, confidence))
-
-    results.update({
-        'in_sample_sharpe': round(avg_is_sharpe, 4),
-        'oos_sharpe': round(avg_oos_sharpe, 4),
-        'oos_accuracy': round(avg_oos_accuracy, 4),
-        'overfit_ratio': round(overfit_ratio, 4),
-        'is_overfit': is_overfit,
-        'model_confidence': round(confidence, 2),
-    })
-
-    # Log summary
-    overfit_status = "⚠️ OVERFIT DETECTED" if is_overfit else "✅ OK"
-    logger.info(
-        f"{regime} WF Summary: IS={avg_is_sharpe:.4f}, OOS={avg_oos_sharpe:.4f}, "
-        f"Acc={avg_oos_accuracy:.2%}, Ratio={overfit_ratio:.2f} {overfit_status}"
-    )
-
-    return results
 
 
 def _save_training_report(regime_results: dict, X: pd.DataFrame) -> str:
@@ -455,22 +277,24 @@ def _save_training_report(regime_results: dict, X: pd.DataFrame) -> str:
             
             # Summary table
             f.write("REGIME PERFORMANCE SUMMARY\n")
-            f.write("-" * 70 + "\n")
-            f.write(f"{'Regime':<20} {'Samples':<10} {'Accuracy':<12} {'Sharpe':<12} {'Status':<15}\n")
-            f.write("-" * 70 + "\n")
+            f.write("-" * 90 + "\n")
+            f.write(f"{'Regime':<20} {'Samples':<10} {'Accuracy':<12} {'F1':<10} {'NEUTRAL_R':<12} {'Status':<15}\n")
+            f.write("-" * 90 + "\n")
             
             for regime, metrics in regime_results.items():
                 samples = metrics.get('samples', 'N/A')
                 accuracy = metrics.get('accuracy', 'N/A')
-                sharpe = metrics.get('sharpe', 'N/A')
+                f1_val = metrics.get('f1_score', 'N/A')
+                neutral_r = metrics.get('neutral_recall', 'N/A')
                 status = metrics.get('status', 'unknown')
                 
                 acc_str = f"{accuracy:.2%}" if isinstance(accuracy, float) else str(accuracy)
-                sharpe_str = f"{sharpe:.4f}" if isinstance(sharpe, float) else str(sharpe)
+                f1_str = f"{f1_val:.4f}" if isinstance(f1_val, float) else str(f1_val)
+                nr_str = f"{neutral_r:.2%}" if isinstance(neutral_r, float) else str(neutral_r)
                 
-                f.write(f"{regime:<20} {samples:<10} {acc_str:<12} {sharpe_str:<12} {status:<15}\n")
+                f.write(f"{regime:<20} {samples:<10} {acc_str:<12} {f1_str:<10} {nr_str:<12} {status:<15}\n")
             
-            f.write("-" * 70 + "\n\n")
+            f.write("-" * 90 + "\n\n")
             
             # Data distribution
             f.write("DATA DISTRIBUTION BY REGIME\n")
@@ -490,10 +314,26 @@ def _save_training_report(regime_results: dict, X: pd.DataFrame) -> str:
             for regime, metrics in regime_results.items():
                 f.write(f"\n[{regime}]\n")
                 for key, value in metrics.items():
+                    if key in ('classification_report', 'feature_importance_top10'):
+                        continue  # Written separately below
                     if isinstance(value, float):
                         f.write(f"  {key}: {value:.4f}\n")
                     else:
                         f.write(f"  {key}: {value}\n")
+                
+                # Classification report (per-class precision/recall/f1)
+                cls_report = metrics.get('classification_report')
+                if cls_report:
+                    f.write(f"\n  Classification Report:\n")
+                    for line in cls_report.strip().split('\n'):
+                        f.write(f"    {line}\n")
+                
+                # Feature importance
+                feat_imp = metrics.get('feature_importance_top10')
+                if feat_imp:
+                    f.write(f"\n  Top-10 Feature Importance:\n")
+                    for fname, fval in feat_imp:
+                        f.write(f"    {fname:<25} {fval:.4f}\n")
             
             f.write("\n" + "=" * 70 + "\n")
             f.write("END OF REPORT\n")
@@ -520,7 +360,6 @@ def train_models(self):
     try:
         repo = SyncStockRepository(session)
         feature_engineer = FeatureEngineer()
-        predictor = PredictorService()
 
         # 1. Load active symbols
         symbols = repo.get_active_symbols()
@@ -535,15 +374,15 @@ def train_models(self):
         start_date = end_date - timedelta(days=LOOKBACK_YEARS * 365)
 
         X, y, successful_symbols = _load_and_prepare_data(
-            repo, feature_engineer, symbols, start_date, end_date, symbol_limit=10, classify_regime=True
+            repo, feature_engineer, symbols, start_date, end_date, symbol_limit=None, classify_regime=True
         )
 
         if X.empty:
             logger.error("학습용 데이터를 수집하지 못했습니다")
             return
 
-        # Data size validation
-        if len(X) < 500:
+        # Data size validation (daily bars: 일봉 기준 300개 ≈ 1.2년)
+        if len(X) < 300:
             logger.warning(f"데이터셋이 작습니다: {len(X)} 샘플. 더 긴 백필 또는 심볼 확대를 고려하세요.")
 
         logger.info(f"총 데이터: {len(X)} 샘플, {len(successful_symbols)}개 심볼로부터")
@@ -553,95 +392,10 @@ def train_models(self):
 
         if has_regime:
             logger.info("레짐별 모델 학습")
-            _train_regime_specific_models(feature_engineer, X, y)
+            regime_results = _train_regime_specific_models(feature_engineer, X, y)
 
-            # FIX: predictor를 재초기화하여 새로 학습된 모델 로드
-            logger.info("\n" + "="*60)
-            logger.info("학습된 모델 검증 (PredictorService 사용)")
-            logger.info("="*60)
-
-            regime_results = {}  # Collect results for report
-
-            try:
-                # 새로 학습된 모델을 로드하기 위해 predictor 재초기화
-                predictor.reload_models()
-                
-                # PredictorService로 각 regime 모델 로드 및 평가
-                for regime in MarketRegime:
-                    regime_value = regime.value
-                    regime_mask = X['regime'] == regime_value
-                    X_regime = X[regime_mask].drop(columns=['regime'])
-                    y_regime = y[regime_mask]
-
-                    if len(X_regime) < 100:
-                        logger.info(f"{regime_value}: 데이터 부족 (샘플 {len(X_regime)}개), 검증 스킵")
-                        regime_results[regime_value] = {
-                            'samples': len(X_regime),
-                            'status': 'insufficient_data'
-                        }
-                        continue
-
-                    # predictor로 모델 가져오기
-                    try:
-                        ensemble = predictor.get_model(regime)
-                        if ensemble is None:
-                            logger.warning(f"{regime_value}: 모델 파일 없음, 검증 스킵")
-                            regime_results[regime_value] = {
-                                'samples': len(X_regime),
-                                'status': 'no_model'
-                            }
-                            continue
-
-                        # 검증 데이터로 평가 (최근 20% 사용)
-                        split_idx = int(len(X_regime) * 0.8)
-                        X_val = X_regime.iloc[split_idx:]
-                        y_val = y_regime.iloc[split_idx:]
-
-                        # Feature scaling
-                        market_avg_volume = X_regime['volume'].mean() if 'volume' in X_regime.columns else None
-                        X_val_scaled = feature_engineer.extract_feature_vector(
-                            X_val, fit_scaler=False, market_avg_volume=market_avg_volume
-                        )
-
-                        # 예측 및 정확도 계산
-                        predictions = ensemble.predict(X_val_scaled)
-                        pred_dir = (predictions > 0).astype(int) * 2 - 1
-                        actual_dir = (y_val.values > 0).astype(int) * 2 - 1
-                        accuracy = (pred_dir == actual_dir).mean()
-
-                        # Sharpe ratio 계산
-                        returns = y_val.values * pred_dir
-                        sharpe = returns.mean() / (returns.std() + 1e-8) * ((252 * 26) ** 0.5)
-
-                        logger.info(f"{regime_value} 모델 검증 완료:")
-                        logger.info(f"  - 샘플: {len(X_regime)} (검증: {len(X_val)})")
-                        logger.info(f"  - 방향 정확도: {accuracy:.2%}")
-                        logger.info(f"  - Sharpe Ratio: {sharpe:.4f}")
-
-                        # Collect results for report
-                        regime_results[regime_value] = {
-                            'samples': len(X_regime),
-                            'validation_samples': len(X_val),
-                            'accuracy': accuracy,
-                            'sharpe': sharpe,
-                            'status': 'success'
-                        }
-
-                    except Exception as e:
-                        logger.error(f"{regime_value} 모델 검증 실패: {e}", exc_info=True)
-                        regime_results[regime_value] = {
-                            'samples': len(X_regime),
-                            'status': 'error',
-                            'error': str(e)
-                        }
-
-                logger.info("="*60 + "\n")
-
-                # Save training report to text file
-                _save_training_report(regime_results, X)
-
-            except Exception as e:
-                logger.error(f"모델 검증 중 오류: {e}", exc_info=True)
+            # Save training report
+            _save_training_report(regime_results, X)
 
             session.commit()
             logger.info("학습 완료 - 레짐별 모델이 저장되었습니다")
@@ -658,37 +412,101 @@ def train_models(self):
         session.close()
 
 
+def _load_regime_params(regime_value: str) -> dict:
+    """Load best hyperparameters for a specific regime.
+
+    Search order:
+    1. ``best_params_{regime_value}.json`` (regime-specific file from tune_models)
+    2. ``best_params.json`` → ``regime_specific[regime_value]`` (combined file)
+    3. ``best_params.json`` → ``default`` (combined file fallback)
+    4. ``best_params.json`` top-level keys (legacy global format)
+    5. Empty dict (will use model defaults)
+
+    Args:
+        regime_value: Regime name string (e.g., 'bull_trending').
+
+    Returns:
+        Dict with 'catboost', 'lgbm', 'xgboost' keys.
+    """
+    model_keys = ('catboost', 'lgbm', 'xgboost')
+
+    # 1. Try regime-specific file
+    regime_path = f"{MODEL_SAVE_PATH}/best_params_{regime_value}.json"
+    if os.path.exists(regime_path):
+        try:
+            with open(regime_path) as f:
+                data = json.load(f)
+            # Regime file may have extra keys like 'regime', 'samples', 'tuned_at'
+            params = {k: v for k, v in data.items() if k in model_keys}
+            if params:
+                logger.info("Loaded regime-specific params from %s", regime_path)
+                return params
+        except Exception as e:
+            logger.warning("Failed to load %s: %s", regime_path, e)
+
+    # 2-4. Try combined file
+    combined_path = f"{MODEL_SAVE_PATH}/best_params.json"
+    if os.path.exists(combined_path):
+        try:
+            with open(combined_path) as f:
+                data = json.load(f)
+
+            # 2. Check regime_specific section
+            regime_specific = data.get("regime_specific", {})
+            if regime_value in regime_specific and regime_specific[regime_value]:
+                logger.info("Loaded params from best_params.json[regime_specific][%s]", regime_value)
+                return regime_specific[regime_value]
+
+            # 3. Use default section
+            default_params = data.get("default")
+            if default_params and isinstance(default_params, dict):
+                logger.info("Loaded default params from best_params.json for %s", regime_value)
+                return default_params
+
+            # 4. Legacy format: top-level catboost/lgbm/xgboost keys
+            if "catboost" in data:
+                logger.info("Loaded legacy params from best_params.json for %s", regime_value)
+                return {k: v for k, v in data.items() if k in model_keys}
+
+        except Exception as e:
+            logger.warning("Failed to load %s: %s", combined_path, e)
+
+    # 5. No params found
+    logger.info("No tuned params found for %s, using model defaults", regime_value)
+    return {}
+
+
 def _train_regime_specific_models(
     feature_engineer: FeatureEngineer,
     X: pd.DataFrame,
-    y: pd.Series
-):
-    """
-    Train 4 regime-specific ensemble models.
-    
-    
+    y: pd.Series,
+) -> dict[str, dict]:
+    """Train 4 regime-specific ensemble classifier models with holdout validation.
+
+    For each regime:
+    1. Split data into 80% train / 20% holdout (chronological).
+    2. Walk-Forward weight calculation on the **train** portion only.
+    3. Train a *validation* ensemble on train → evaluate on holdout (true OOS).
+    4. Train a *production* ensemble on **all** regime data → save to disk.
+
+    Uses EnsembleClassifierWrapper (VotingClassifier with soft voting)
+    for ternary classification (0=DOWN, 1=NEUTRAL, 2=UP).
+
     Args:
-        feature_engineer: Feature engineering instance
-        X: Feature DataFrame (with 'regime' column)
-        y: Target Series
+        feature_engineer: Feature engineering instance.
+        X: Feature DataFrame (with 'regime' column).
+        y: Target Series (ternary: 0/1/2).
+
+    Returns:
+        Dict of ``regime_value`` → validation result dict.
     """
-    from app.ml.models import EnsembleWrapper
+    holdout_results: dict[str, dict] = {}
+    holdout_ratio = 0.2
 
-    # Load tuning params
-    best_params_path = f"{MODEL_SAVE_PATH}/best_params.json"
-    tuning_config = {}
-    if os.path.exists(best_params_path):
-        try:
-            with open(best_params_path) as f:
-                tuning_config = json.load(f)
-        except Exception as e:
-            logger.warning(f"튜닝 파라미터 로드 실패: {e}")
-
-    # Iterate through each regime
     for regime in MarketRegime:
         regime_value = regime.value
         logger.info(f"\n{'='*60}")
-        logger.info(f"Training {regime_value.upper()} regime model")
+        logger.info(f"Training {regime_value.upper()} regime classifier model")
         logger.info(f"{'='*60}")
 
         # Filter data for this regime
@@ -698,82 +516,202 @@ def _train_regime_specific_models(
 
         logger.info(f"Regime data: {len(X_regime)} samples ({len(X_regime)/len(X)*100:.1f}% of total)")
 
-        # Minimum data requirement
-        # sideways_volatile 같은 희귀 regime도 학습 가능하도록 최소 샘플 100으로 완화 (고민중)
-        min_samples = 1000
+        # Minimum data requirement (daily bars: 500 ≈ 2 years)
+        min_samples = 500
         if len(X_regime) < min_samples:
             logger.warning(f"Insufficient {regime_value} data: {len(X_regime)} < {min_samples} samples")
             logger.warning(f"Skipping {regime_value} model training (will use generic fallback)")
+            holdout_results[regime_value] = {
+                'samples': len(X_regime),
+                'status': 'insufficient_data',
+            }
             continue
 
-        # # 데이터 양에 따른 경고 (1000개 미만)
-        # if len(X_regime) < 1000:
-        #     logger.warning(f"{regime_value}: 샘플 수 부족 ({len(X_regime)}개). 과적합 위험 있음. 더 많은 데이터 수집 권장.")
+        # Log class distribution
+        class_dist = y_regime.value_counts().to_dict()
+        logger.info(f"  Class distribution: {class_dist}")
 
-        # Calculate market average volume for this regime
-        market_avg_volume = X_regime['volume'].mean() if 'volume' in X_regime.columns else None
+        # Load regime-specific tuning params
+        regime_params = _load_regime_params(regime_value)
 
-        # Feature scaling
-        X_regime_scaled = feature_engineer.extract_feature_vector(
-            X_regime, fit_scaler=True, market_avg_volume=market_avg_volume
+        # Inject regime-specific class weights (override defaults)
+        regime_weights = REGIME_CLASS_WEIGHTS.get(regime_value)
+        if regime_weights:
+            regime_params.setdefault('catboost', {})
+            regime_params.setdefault('lgbm', {})
+            regime_params.setdefault('xgboost', {})
+            # CatBoost uses list format: [weight_class_0, weight_class_1, weight_class_2]
+            regime_params['catboost']['class_weights'] = [
+                regime_weights[i] for i in range(len(CLASS_NAMES))
+            ]
+            # LightGBM uses dict format: {class_label: weight}
+            regime_params['lgbm']['class_weight'] = regime_weights.copy()
+            # XGBoost uses dict format: {class_label: weight} (converted to sample_weight internally)
+            regime_params['xgboost']['class_weight'] = regime_weights.copy()
+            logger.info(f"  Regime class weights: {regime_weights}")
+
+        # --- 1. Holdout split (chronological) ---
+        split_idx = int(len(X_regime) * (1 - holdout_ratio))
+        X_train = X_regime.iloc[:split_idx]
+        y_train = y_regime.iloc[:split_idx]
+        X_holdout = X_regime.iloc[split_idx:]
+        y_holdout = y_regime.iloc[split_idx:]
+
+        market_avg_volume_train = (
+            X_train['volume'].mean() if 'volume' in X_train.columns else None
         )
 
-        # Walk-Forward validation to calculate weights
+        # --- 2. Walk-Forward weight calculation on TRAIN portion only ---
         models_to_eval = [
-            ('catboost', CatBoostWrapper(**tuning_config.get('catboost', {}))),
-            ('lgbm', LGBMWrapper(**tuning_config.get('lgbm', {}))),
-            ('xgboost', XGBoostWrapper(**tuning_config.get('xgboost', {})))
+            ('catboost', CatBoostClassifierWrapper()),
+            ('lgbm', LGBMClassifierWrapper()),
+            ('xgboost', XGBoostClassifierWrapper()),
         ]
 
-        sharpe_ratios = []
+        accuracy_scores: list[float] = []
         for name, model in models_to_eval:
             try:
-                logger.info(f"  Training {name}...")
-                # Use TimeSeriesSplit for regime-specific validation
+                logger.info(f"  Walk-Forward classifier {name}...")
                 tscv = TimeSeriesSplit(n_splits=3)
-                scores = []
-                for train_idx, val_idx in tscv.split(X_regime_scaled):
-                    X_tr, X_val = X_regime_scaled.iloc[train_idx], X_regime_scaled.iloc[val_idx]
-                    y_tr, y_val = y_regime.iloc[train_idx], y_regime.iloc[val_idx]
+                scores: list[float] = []
+                for train_idx, val_idx in tscv.split(X_train):
+                    X_tr_raw = X_train.iloc[train_idx]
+                    X_val_raw = X_train.iloc[val_idx]
+                    y_tr = y_train.iloc[train_idx]
+                    y_val = y_train.iloc[val_idx]
+
+                    X_tr = feature_engineer.extract_feature_vector(
+                        X_tr_raw, fit_scaler=True,
+                        market_avg_volume=market_avg_volume_train,
+                        feature_set="base", scaler_suffix=regime_value,
+                    )
+                    X_val = feature_engineer.extract_feature_vector(
+                        X_val_raw, fit_scaler=False,
+                        market_avg_volume=market_avg_volume_train,
+                        feature_set="base", scaler_suffix=regime_value,
+                    )
+
                     model.train(X_tr, y_tr)
                     pred = model.predict(X_val)
-                    pred_dir = (pred > 0).astype(int) * 2 - 1
-                    returns = y_val.values * pred_dir
-                    sharpe = returns.mean() / (returns.std() + 1e-8) * ((252 * 26) ** 0.5)
-                    scores.append(sharpe)
-                sharpe = sum(scores) / len(scores) if scores else 0.0
-                sharpe_ratios.append(max(sharpe, 0.1))
-                logger.info(f"  {name} | Sharpe: {sharpe:.4f}")
+                    acc = accuracy_score(y_val.values, pred)
+                    scores.append(acc)
+
+                avg_acc = sum(scores) / len(scores) if scores else 0.0
+                accuracy_scores.append(max(avg_acc, 0.1))
+                logger.info(f"  {name} | Accuracy: {avg_acc:.4f}")
             except Exception as e:
                 logger.error(f"  {name} 처리 실패: {e}", exc_info=True)
-                sharpe_ratios.append(0.1)
+                accuracy_scores.append(0.1)
 
-        # Normalize weights
-        total = sum(sharpe_ratios)
-        weights = [s / total for s in sharpe_ratios] if total > 0 else [0.33, 0.33, 0.34]
+        total = sum(accuracy_scores)
+        weights = [s / total for s in accuracy_scores] if total > 0 else [0.33, 0.33, 0.34]
         logger.info(f"  Ensemble weights: {[round(w, 3) for w in weights]}")
 
-        # Train ensemble
+        # --- 3. Validation ensemble (train → holdout, true OOS) ---
         try:
-            ensemble = EnsembleWrapper(weights=weights, model_params=tuning_config)
-            ensemble.train(X_regime_scaled, y_regime)
+            X_train_scaled = feature_engineer.extract_feature_vector(
+                X_train, fit_scaler=True,
+                market_avg_volume=market_avg_volume_train,
+                feature_set="base", scaler_suffix=regime_value,
+            )
+            X_holdout_scaled = feature_engineer.extract_feature_vector(
+                X_holdout, fit_scaler=False,
+                market_avg_volume=market_avg_volume_train,
+                feature_set="base", scaler_suffix=regime_value,
+            )
 
-            # Save model
-            model_filename = f"ensemble_model_{regime_value}.pkl"
-            model_path = os.path.join(MODEL_SAVE_PATH, model_filename)
-            ensemble.save(model_path)
+            val_ensemble = EnsembleClassifierWrapper(weights=weights, model_params=regime_params)
+            val_ensemble.train(X_train_scaled, y_train)
 
-            logger.info(f"{regime_value.upper()} model saved: {model_filename}")
+            predictions = val_ensemble.predict(X_holdout_scaled)
+            accuracy = accuracy_score(y_holdout.values, predictions)
+            f1 = f1_score(y_holdout.values, predictions, average='weighted', zero_division=0)
 
+            # Per-class metrics
+            cls_report_str = classification_report(
+                y_holdout.values, predictions,
+                target_names=CLASS_NAMES, zero_division=0,
+            )
+            logger.info(f"\n{cls_report_str}")
+
+            # NEUTRAL recall (class 1)
+            neutral_mask = y_holdout.values == 1
+            neutral_correct = (predictions[neutral_mask] == 1).sum() if neutral_mask.any() else 0
+            neutral_total = neutral_mask.sum()
+            neutral_recall = neutral_correct / neutral_total if neutral_total > 0 else 0.0
+
+            logger.info(f"{regime_value} 모델 검증 (True Out-of-Sample):")
+            logger.info(f"  - 학습: {len(X_train)} 샘플, 검증: {len(X_holdout)} 샘플")
+            logger.info(f"  - 정확도: {accuracy:.2%}")
+            logger.info(f"  - F1-Score (weighted): {f1:.4f}")
+            logger.info(f"  - 예측 분포: {pd.Series(predictions).value_counts().to_dict()}")
+            logger.info(f"  - 실제 분포: {y_holdout.value_counts().to_dict()}")
+
+            holdout_results[regime_value] = {
+                'samples': len(X_regime),
+                'train_samples': len(X_train),
+                'validation_samples': len(X_holdout),
+                'accuracy': accuracy,
+                'f1_score': f1,
+                'neutral_recall': neutral_recall,
+                'classification_report': cls_report_str,
+                'pred_distribution': pd.Series(predictions).value_counts().to_dict(),
+                'actual_distribution': y_holdout.value_counts().to_dict(),
+                'status': 'success',
+            }
         except Exception as e:
-            logger.error(f"{regime_value} 모델 학습 실패: {e}", exc_info=True)
+            logger.error(f"{regime_value} 검증 앙상블 학습 실패: {e}", exc_info=True)
+            holdout_results[regime_value] = {
+                'samples': len(X_regime),
+                'status': 'error',
+                'error': str(e),
+            }
+
+        # --- 4. Production ensemble (ALL data → save) ---
+        try:
+            market_avg_volume = (
+                X_regime['volume'].mean() if 'volume' in X_regime.columns else None
+            )
+            X_regime_scaled = feature_engineer.extract_feature_vector(
+                X_regime, fit_scaler=True, market_avg_volume=market_avg_volume,
+                feature_set="base", scaler_suffix=regime_value,
+            )
+            production_ensemble = EnsembleClassifierWrapper(weights=weights, model_params=regime_params)
+            production_ensemble.train(X_regime_scaled, y_regime)
+
+            # Log feature importance (top 10)
+            try:
+                feature_names = list(X_regime_scaled.columns) if hasattr(X_regime_scaled, 'columns') else [f"f{i}" for i in range(X_regime_scaled.shape[1])]
+                importances = {}
+                for name, estimator in production_ensemble.model.named_estimators_.items():
+                    if hasattr(estimator, 'feature_importances_'):
+                        imp = estimator.feature_importances_
+                        if len(imp) == len(feature_names):
+                            for fn, iv in zip(feature_names, imp):
+                                importances[fn] = importances.get(fn, 0.0) + iv / 3.0
+                if importances:
+                    sorted_imp = sorted(importances.items(), key=lambda x: x[1], reverse=True)[:10]
+                    logger.info(f"  {regime_value} Top-10 features: {sorted_imp}")
+                    holdout_results[regime_value]['feature_importance_top10'] = sorted_imp
+            except Exception as e:
+                logger.debug(f"Feature importance extraction failed: {e}")
+
+            model_filename = f"ensemble_classifier_{regime_value}.pkl"
+            model_path = os.path.join(MODEL_SAVE_PATH, model_filename)
+            production_ensemble.save(model_path)
+
+            logger.info(f"{regime_value.upper()} production classifier saved: {model_filename}")
+        except Exception as e:
+            logger.error(f"{regime_value} 프로덕션 모델 학습 실패: {e}", exc_info=True)
 
     logger.info(f"\n{'='*60}")
-    logger.info("Regime-specific training complete")
+    logger.info("Regime-specific classifier training complete")
     logger.info(f"{'='*60}\n")
 
+    return holdout_results
 
-@celery_app.task(name="app.tasks.training.tune_models", bind=True)
+
+@celery_app.task(name="app.tasks.training.tune_models", bind=True, max_retries=2)
 @notify_on_failure("tune_models")
 def tune_models(self):
     """
@@ -854,7 +792,8 @@ def tune_models(self):
             # Scale features
             market_avg_volume = X_regime['volume'].mean() if 'volume' in X_regime.columns else None
             X_regime_scaled = feature_engineer.extract_feature_vector(
-                X_regime, fit_scaler=True, market_avg_volume=market_avg_volume
+                X_regime, fit_scaler=True, market_avg_volume=market_avg_volume,
+                feature_set="base", scaler_suffix=regime_value
             )
 
             # Tune for this regime
@@ -913,6 +852,44 @@ def tune_models(self):
         session.close()
 
 
+def _calculate_composite_score(
+    y_val_values: np.ndarray,
+    predictions: np.ndarray
+) -> tuple:
+    """
+    Calculate composite objective score for classification models.
+
+    Combines accuracy, weighted F1-score, and class balance into
+    a single scalar for Optuna optimization.
+
+    Composite = 0.40 * accuracy + 0.40 * f1_weighted + 0.20 * (1 - class_imbalance)
+
+    Args:
+        y_val_values: Actual target values (numpy array, ternary 0/1/2)
+        predictions: Model predictions (numpy array, ternary 0/1/2)
+
+    Returns:
+        Tuple of (composite_score, accuracy, f1_weighted, class_balance_penalty)
+    """
+    # 1. Overall accuracy
+    acc = float(accuracy_score(y_val_values, predictions))
+
+    # 2. Weighted F1-score (handles class imbalance)
+    f1 = float(f1_score(y_val_values, predictions, average='weighted', zero_division=0))
+
+    # 3. Class balance: penalize if model predicts only one class
+    unique_preds = np.unique(predictions)
+    class_balance = len(unique_preds) / len(CLASS_NAMES)  # 0.33 to 1.0
+
+    composite = (
+        0.40 * acc
+        + 0.40 * f1
+        + 0.20 * class_balance
+    )
+
+    return composite, acc, f1, class_balance
+
+
 def _tune_regime_models(
     X_scaled: pd.DataFrame,
     y: pd.Series,
@@ -934,9 +911,9 @@ def _tune_regime_models(
     n_jobs = 3
     timeout = 1800  # 30 minutes per model
 
-    # CatBoost tuning
+    # CatBoost Classifier tuning
     logger.info("=" * 60)
-    logger.info(f"[{regime_name.upper()}] CatBoost Tuning ({n_trials} trials)")
+    logger.info(f"[{regime_name.upper()}] CatBoost Classifier Tuning ({n_trials} trials)")
     logger.info("=" * 60)
 
     def catboost_objective(trial):
@@ -949,9 +926,9 @@ def _tune_regime_models(
             'allow_writing_files': False
         }
 
-        model = CatBoostWrapper(**params)
+        model = CatBoostClassifierWrapper(**params)
         tscv = TimeSeriesSplit(n_splits=3)
-        scores = []
+        fold_composites, fold_accs, fold_f1s, fold_balances = [], [], [], []
 
         for train_idx, val_idx in tscv.split(X_scaled):
             X_tr, X_val = X_scaled.iloc[train_idx], X_scaled.iloc[val_idx]
@@ -960,12 +937,17 @@ def _tune_regime_models(
             model.train(X_tr, y_tr)
             pred = model.predict(X_val)
 
-            pred_dir = (pred > 0).astype(int) * 2 - 1
-            returns = y_val.values * pred_dir
-            sharpe = returns.mean() / (returns.std() + 1e-8) * ((252 * 26) ** 0.5)
-            scores.append(sharpe)
+            composite, acc, f1, balance = _calculate_composite_score(y_val.values, pred)
+            fold_composites.append(composite)
+            fold_accs.append(acc)
+            fold_f1s.append(f1)
+            fold_balances.append(balance)
 
-        return sum(scores) / len(scores)
+        avg_composite = sum(fold_composites) / len(fold_composites)
+        trial.set_user_attr('avg_accuracy', sum(fold_accs) / len(fold_accs))
+        trial.set_user_attr('avg_f1', sum(fold_f1s) / len(fold_f1s))
+        trial.set_user_attr('avg_balance', sum(fold_balances) / len(fold_balances))
+        return avg_composite
 
     study_cat = optuna.create_study(
         direction='maximize',
@@ -974,11 +956,15 @@ def _tune_regime_models(
     study_cat.optimize(catboost_objective, n_trials=n_trials, n_jobs=n_jobs,
                        timeout=timeout, show_progress_bar=False)
     best_catboost = study_cat.best_params
-    logger.info(f"[{regime_name.upper()}] CatBoost Best Sharpe: {study_cat.best_value:.4f}")
+    best_trial_cat = study_cat.best_trial
+    logger.info(f"[{regime_name.upper()}] CatBoost Best Composite: {best_trial_cat.value:.4f} "
+                f"(Acc={best_trial_cat.user_attrs['avg_accuracy']:.2%}, "
+                f"F1={best_trial_cat.user_attrs['avg_f1']:.4f}, "
+                f"Balance={best_trial_cat.user_attrs['avg_balance']:.2f})")
 
-    # LGBM tuning
+    # LGBM Classifier tuning
     logger.info("=" * 60)
-    logger.info(f"[{regime_name.upper()}] LightGBM Tuning ({n_trials} trials)")
+    logger.info(f"[{regime_name.upper()}] LightGBM Classifier Tuning ({n_trials} trials)")
     logger.info("=" * 60)
 
     def lgbm_objective(trial):
@@ -994,9 +980,9 @@ def _tune_regime_models(
             'verbose': -1
         }
 
-        model = LGBMWrapper(**params)
+        model = LGBMClassifierWrapper(**params)
         tscv = TimeSeriesSplit(n_splits=3)
-        scores = []
+        fold_composites, fold_accs, fold_f1s, fold_balances = [], [], [], []
 
         for train_idx, val_idx in tscv.split(X_scaled):
             X_tr, X_val = X_scaled.iloc[train_idx], X_scaled.iloc[val_idx]
@@ -1005,12 +991,17 @@ def _tune_regime_models(
             model.train(X_tr, y_tr)
             pred = model.predict(X_val)
 
-            pred_dir = (pred > 0).astype(int) * 2 - 1
-            returns = y_val.values * pred_dir
-            sharpe = returns.mean() / (returns.std() + 1e-8) * ((252 * 26) ** 0.5)
-            scores.append(sharpe)
+            composite, acc, f1, balance = _calculate_composite_score(y_val.values, pred)
+            fold_composites.append(composite)
+            fold_accs.append(acc)
+            fold_f1s.append(f1)
+            fold_balances.append(balance)
 
-        return sum(scores) / len(scores)
+        avg_composite = sum(fold_composites) / len(fold_composites)
+        trial.set_user_attr('avg_accuracy', sum(fold_accs) / len(fold_accs))
+        trial.set_user_attr('avg_f1', sum(fold_f1s) / len(fold_f1s))
+        trial.set_user_attr('avg_balance', sum(fold_balances) / len(fold_balances))
+        return avg_composite
 
     study_lgbm = optuna.create_study(
         direction='maximize',
@@ -1019,11 +1010,15 @@ def _tune_regime_models(
     study_lgbm.optimize(lgbm_objective, n_trials=n_trials, n_jobs=n_jobs,
                         timeout=timeout, show_progress_bar=False)
     best_lgbm = study_lgbm.best_params
-    logger.info(f"[{regime_name.upper()}] LGBM Best Sharpe: {study_lgbm.best_value:.4f}")
+    best_trial_lgbm = study_lgbm.best_trial
+    logger.info(f"[{regime_name.upper()}] LGBM Best Composite: {best_trial_lgbm.value:.4f} "
+                f"(Acc={best_trial_lgbm.user_attrs['avg_accuracy']:.2%}, "
+                f"F1={best_trial_lgbm.user_attrs['avg_f1']:.4f}, "
+                f"Balance={best_trial_lgbm.user_attrs['avg_balance']:.2f})")
 
-    # XGBoost tuning
+    # XGBoost Classifier tuning
     logger.info("=" * 60)
-    logger.info(f"[{regime_name.upper()}] XGBoost Tuning ({n_trials} trials)")
+    logger.info(f"[{regime_name.upper()}] XGBoost Classifier Tuning ({n_trials} trials)")
     logger.info("=" * 60)
 
     def xgb_objective(trial):
@@ -1038,9 +1033,9 @@ def _tune_regime_models(
             'verbosity': 0
         }
 
-        model = XGBoostWrapper(**params)
+        model = XGBoostClassifierWrapper(**params)
         tscv = TimeSeriesSplit(n_splits=3)
-        scores = []
+        fold_composites, fold_accs, fold_f1s, fold_balances = [], [], [], []
 
         for train_idx, val_idx in tscv.split(X_scaled):
             X_tr, X_val = X_scaled.iloc[train_idx], X_scaled.iloc[val_idx]
@@ -1049,12 +1044,17 @@ def _tune_regime_models(
             model.train(X_tr, y_tr)
             pred = model.predict(X_val)
 
-            pred_dir = (pred > 0).astype(int) * 2 - 1
-            returns = y_val.values * pred_dir
-            sharpe = returns.mean() / (returns.std() + 1e-8) * ((252 * 26) ** 0.5)
-            scores.append(sharpe)
+            composite, acc, f1, balance = _calculate_composite_score(y_val.values, pred)
+            fold_composites.append(composite)
+            fold_accs.append(acc)
+            fold_f1s.append(f1)
+            fold_balances.append(balance)
 
-        return sum(scores) / len(scores)
+        avg_composite = sum(fold_composites) / len(fold_composites)
+        trial.set_user_attr('avg_accuracy', sum(fold_accs) / len(fold_accs))
+        trial.set_user_attr('avg_f1', sum(fold_f1s) / len(fold_f1s))
+        trial.set_user_attr('avg_balance', sum(fold_balances) / len(fold_balances))
+        return avg_composite
 
     study_xgb = optuna.create_study(
         direction='maximize',
@@ -1063,7 +1063,11 @@ def _tune_regime_models(
     study_xgb.optimize(xgb_objective, n_trials=n_trials, n_jobs=n_jobs,
                        timeout=timeout, show_progress_bar=False)
     best_xgb = study_xgb.best_params
-    logger.info(f"[{regime_name.upper()}] XGBoost Best Sharpe: {study_xgb.best_value:.4f}")
+    best_trial_xgb = study_xgb.best_trial
+    logger.info(f"[{regime_name.upper()}] XGBoost Best Composite: {best_trial_xgb.value:.4f} "
+                f"(Acc={best_trial_xgb.user_attrs['avg_accuracy']:.2%}, "
+                f"F1={best_trial_xgb.user_attrs['avg_f1']:.4f}, "
+                f"Balance={best_trial_xgb.user_attrs['avg_balance']:.2f})")
 
     return {
         'catboost': best_catboost,
@@ -1087,7 +1091,7 @@ def _tune_models_global(
     market_avg_volume = X['volume'].mean() if 'volume' in X.columns else None
 
     # Scale features
-    X_scaled = feature_engineer.extract_feature_vector(X, fit_scaler=True, market_avg_volume=market_avg_volume)
+    X_scaled = feature_engineer.extract_feature_vector(X, fit_scaler=True, market_avg_volume=market_avg_volume, feature_set="base")
 
     # CatBoost tuning
     logger.info("=" * 60)
@@ -1104,9 +1108,9 @@ def _tune_models_global(
             'allow_writing_files': False
         }
 
-        model = CatBoostWrapper(**params)
+        model = CatBoostClassifierWrapper(**params)
         tscv = TimeSeriesSplit(n_splits=3)
-        scores = []
+        fold_composites, fold_accs, fold_f1s, fold_balances = [], [], [], []
 
         for train_idx, val_idx in tscv.split(X_scaled):
             X_tr, X_val = X_scaled.iloc[train_idx], X_scaled.iloc[val_idx]
@@ -1115,14 +1119,21 @@ def _tune_models_global(
             model.train(X_tr, y_tr)
             pred = model.predict(X_val)
 
-            pred_dir = (pred > 0).astype(int) * 2 - 1
-            returns = y_val.values * pred_dir
-            sharpe = returns.mean() / (returns.std() + 1e-8) * ((252 * 26) ** 0.5)
-            scores.append(sharpe)
+            composite, acc, f1, balance = _calculate_composite_score(y_val.values, pred)
+            fold_composites.append(composite)
+            fold_accs.append(acc)
+            fold_f1s.append(f1)
+            fold_balances.append(balance)
 
-        avg_sharpe = sum(scores) / len(scores)
-        logger.info(f"[CatBoost Trial {trial.number + 1}/100] Avg Sharpe: {avg_sharpe:.4f}")
-        return avg_sharpe
+        avg_composite = sum(fold_composites) / len(fold_composites)
+        trial.set_user_attr('avg_accuracy', sum(fold_accs) / len(fold_accs))
+        trial.set_user_attr('avg_f1', sum(fold_f1s) / len(fold_f1s))
+        trial.set_user_attr('avg_balance', sum(fold_balances) / len(fold_balances))
+        logger.info(f"[CatBoost Trial {trial.number + 1}/100] Composite: {avg_composite:.4f} "
+                    f"(Acc={trial.user_attrs['avg_accuracy']:.2%}, "
+                    f"F1={trial.user_attrs['avg_f1']:.4f}, "
+                    f"Balance={trial.user_attrs['avg_balance']:.2f})")
+        return avg_composite
 
     study_cat = optuna.create_study(
         direction='maximize',
@@ -1130,9 +1141,13 @@ def _tune_models_global(
     )
     study_cat.optimize(catboost_objective, n_trials=100, n_jobs=3, timeout=3600, show_progress_bar=False)
     best_catboost = study_cat.best_params
+    best_trial_cat = study_cat.best_trial
     logger.info("=" * 60)
     logger.info(f"CatBoost Best Params: {best_catboost}")
-    logger.info(f"CatBoost Best Sharpe: {study_cat.best_value:.4f}")
+    logger.info(f"CatBoost Best Composite: {best_trial_cat.value:.4f} "
+                f"(Acc={best_trial_cat.user_attrs['avg_accuracy']:.2%}, "
+                f"F1={best_trial_cat.user_attrs['avg_f1']:.4f}, "
+                f"Balance={best_trial_cat.user_attrs['avg_balance']:.2f})")
     logger.info("=" * 60)
 
     # LGBM tuning
@@ -1153,9 +1168,9 @@ def _tune_models_global(
             'verbose': -1
         }
 
-        model = LGBMWrapper(**params)
+        model = LGBMClassifierWrapper(**params)
         tscv = TimeSeriesSplit(n_splits=3)
-        scores = []
+        fold_composites, fold_accs, fold_f1s, fold_balances = [], [], [], []
 
         for train_idx, val_idx in tscv.split(X_scaled):
             X_tr, X_val = X_scaled.iloc[train_idx], X_scaled.iloc[val_idx]
@@ -1164,14 +1179,21 @@ def _tune_models_global(
             model.train(X_tr, y_tr)
             pred = model.predict(X_val)
 
-            pred_dir = (pred > 0).astype(int) * 2 - 1
-            returns = y_val.values * pred_dir
-            sharpe = returns.mean() / (returns.std() + 1e-8) * ((252 * 26) ** 0.5)
-            scores.append(sharpe)
+            composite, acc, f1, balance = _calculate_composite_score(y_val.values, pred)
+            fold_composites.append(composite)
+            fold_accs.append(acc)
+            fold_f1s.append(f1)
+            fold_balances.append(balance)
 
-        avg_sharpe = sum(scores) / len(scores)
-        logger.info(f"[LGBM Trial {trial.number + 1}/100] Avg Sharpe: {avg_sharpe:.4f}")
-        return avg_sharpe
+        avg_composite = sum(fold_composites) / len(fold_composites)
+        trial.set_user_attr('avg_accuracy', sum(fold_accs) / len(fold_accs))
+        trial.set_user_attr('avg_f1', sum(fold_f1s) / len(fold_f1s))
+        trial.set_user_attr('avg_balance', sum(fold_balances) / len(fold_balances))
+        logger.info(f"[LGBM Trial {trial.number + 1}/100] Composite: {avg_composite:.4f} "
+                    f"(Acc={trial.user_attrs['avg_accuracy']:.2%}, "
+                    f"F1={trial.user_attrs['avg_f1']:.4f}, "
+                    f"Balance={trial.user_attrs['avg_balance']:.2f})")
+        return avg_composite
 
     study_lgbm = optuna.create_study(
         direction='maximize',
@@ -1179,9 +1201,13 @@ def _tune_models_global(
     )
     study_lgbm.optimize(lgbm_objective, n_trials=100, n_jobs=3, timeout=3600, show_progress_bar=False)
     best_lgbm = study_lgbm.best_params
+    best_trial_lgbm = study_lgbm.best_trial
     logger.info("=" * 60)
     logger.info(f"LGBM Best Params: {best_lgbm}")
-    logger.info(f"LGBM Best Sharpe: {study_lgbm.best_value:.4f}")
+    logger.info(f"LGBM Best Composite: {best_trial_lgbm.value:.4f} "
+                f"(Acc={best_trial_lgbm.user_attrs['avg_accuracy']:.2%}, "
+                f"F1={best_trial_lgbm.user_attrs['avg_f1']:.4f}, "
+                f"Balance={best_trial_lgbm.user_attrs['avg_balance']:.2f})")
     logger.info("=" * 60)
 
     # XGBoost tuning
@@ -1201,9 +1227,9 @@ def _tune_models_global(
             'verbosity': 0
         }
 
-        model = XGBoostWrapper(**params)
+        model = XGBoostClassifierWrapper(**params)
         tscv = TimeSeriesSplit(n_splits=3)
-        scores = []
+        fold_composites, fold_accs, fold_f1s, fold_balances = [], [], [], []
 
         for train_idx, val_idx in tscv.split(X_scaled):
             X_tr, X_val = X_scaled.iloc[train_idx], X_scaled.iloc[val_idx]
@@ -1212,14 +1238,21 @@ def _tune_models_global(
             model.train(X_tr, y_tr)
             pred = model.predict(X_val)
 
-            pred_dir = (pred > 0).astype(int) * 2 - 1
-            returns = y_val.values * pred_dir
-            sharpe = returns.mean() / (returns.std() + 1e-8) * ((252 * 26) ** 0.5)
-            scores.append(sharpe)
+            composite, acc, f1, balance = _calculate_composite_score(y_val.values, pred)
+            fold_composites.append(composite)
+            fold_accs.append(acc)
+            fold_f1s.append(f1)
+            fold_balances.append(balance)
 
-        avg_sharpe = sum(scores) / len(scores)
-        logger.info(f"[XGBoost Trial {trial.number + 1}/100] Avg Sharpe: {avg_sharpe:.4f}")
-        return avg_sharpe
+        avg_composite = sum(fold_composites) / len(fold_composites)
+        trial.set_user_attr('avg_accuracy', sum(fold_accs) / len(fold_accs))
+        trial.set_user_attr('avg_f1', sum(fold_f1s) / len(fold_f1s))
+        trial.set_user_attr('avg_balance', sum(fold_balances) / len(fold_balances))
+        logger.info(f"[XGBoost Trial {trial.number + 1}/100] Composite: {avg_composite:.4f} "
+                    f"(Acc={trial.user_attrs['avg_accuracy']:.2%}, "
+                    f"F1={trial.user_attrs['avg_f1']:.4f}, "
+                    f"Balance={trial.user_attrs['avg_balance']:.2f})")
+        return avg_composite
 
     study_xgb = optuna.create_study(
         direction='maximize',
@@ -1227,12 +1260,16 @@ def _tune_models_global(
     )
     study_xgb.optimize(xgb_objective, n_trials=100, n_jobs=3, timeout=3600, show_progress_bar=False)
     best_xgb = study_xgb.best_params
+    best_trial_xgb = study_xgb.best_trial
     logger.info("=" * 60)
     logger.info(f"XGBoost Best Params: {best_xgb}")
-    logger.info(f"XGBoost Best Sharpe: {study_xgb.best_value:.4f}")
+    logger.info(f"XGBoost Best Composite: {best_trial_xgb.value:.4f} "
+                f"(Acc={best_trial_xgb.user_attrs['avg_accuracy']:.2%}, "
+                f"F1={best_trial_xgb.user_attrs['avg_f1']:.4f}, "
+                f"Balance={best_trial_xgb.user_attrs['avg_balance']:.2f})")
     logger.info("=" * 60)
 
-    # Save all tuned configs (without ratio tuning - use Sharpe only for simplicity)
+    # Save all tuned configs (optimized via composite score: Accuracy + F1 + Balance)
     tuning_config = {
         'catboost': best_catboost,
         'lgbm': best_lgbm,
@@ -1248,7 +1285,7 @@ def _tune_models_global(
 
 
 
-@celery_app.task(name="app.tasks.training.analyze_feature_importance", bind=True)
+@celery_app.task(name="app.tasks.training.analyze_feature_importance", bind=True, max_retries=2)
 @notify_on_failure("analyze_feature_importance")
 def analyze_feature_importance(self, regime: str = None):
     """
@@ -1270,17 +1307,17 @@ def analyze_feature_importance(self, regime: str = None):
 
         # Determine model path
         if regime:
-            model_path = f"{MODEL_SAVE_PATH}/ensemble_model_{regime}.pkl"
+            model_path = f"{MODEL_SAVE_PATH}/ensemble_classifier_{regime}.pkl"
         else:
-            model_path = f"{MODEL_SAVE_PATH}/ensemble_model.pkl"
+            model_path = f"{MODEL_SAVE_PATH}/ensemble_classifier.pkl"
 
         if not os.path.exists(model_path):
             logger.error(f"Model not found: {model_path}")
             return {'status': 'error', 'message': f'Model not found: {model_path}'}
 
         # Load model
-        from app.ml.models import EnsembleWrapper
-        ensemble = EnsembleWrapper()
+        from app.ml.models import EnsembleClassifierWrapper
+        ensemble = EnsembleClassifierWrapper()
         ensemble.load(model_path)
 
         # Check if ensemble model was loaded successfully

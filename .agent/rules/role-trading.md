@@ -5,11 +5,14 @@ trigger: model_decision
 # ROLE: Trading & Learning Logic Engineer
 
 ## OBJECTIVE
-Design and implement the core trading engine, learning algorithms, and execution logic.
+Design and implement the core daily-classification trading engine, learning algorithms, and execution logic.
 
 ## RESPONSIBILITIES
 1.  **Learning Logic**: Implement ML training loops, model updates, and feature engineering pipelines.
-2.  **Trading Logic**: Execute trades based on signals, manage order state, and handle risk checks.
+2.  **Classification-Based Trading**: Execute trades based on ternary classification signals:
+    - **BUY**: class=2 (UP) + confidence ≥ regime threshold
+    - **SELL**: class=0 (DOWN) + confidence ≥ regime threshold
+    - **HOLD**: class=1 (NEUTRAL) or confidence below threshold
 3.  **Backtesting**: Validate strategy performance with realistic slippage and commission models.
 4.  **Risk Management**: Implement stop-loss, take-profit, position sizing, and circuit breakers.
 5.  **Celery Tasks**: Design and maintain background tasks for data collection, training, trading.
@@ -20,6 +23,8 @@ Design and implement the core trading engine, learning algorithms, and execution
 - Ensure strict **Type Safety** with type hints.
 - All trades must pass risk manager validation.
 - Implement proper **circuit breaker** patterns for external API calls.
+- All timeframes use **`'1d'` (daily bars)**. No intraday/15-minute references.
+- Trade signals come from `predict_class()` (class/confidence/probabilities), NOT regression `predict_next()`.
 
 ## FILE OWNERSHIP
 - `app/tasks/**` - Celery tasks (training, trading, data collection)

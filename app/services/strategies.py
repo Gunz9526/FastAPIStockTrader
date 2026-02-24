@@ -257,44 +257,51 @@ class BreakoutStrategy(BaseStrategy):
             return Signal('HOLD', 0.0, 0.0, reason=f"오류: {e}")
 
 class MLStrategy(BaseStrategy):
-    """
-    앙상블 모델 예측을 사용하는 머신러닝 기반 전략입니다.
+    """ML 앙상블 분류기를 사용하는 머신러닝 기반 전략.
+
+    Ternary classification (DOWN/NEUTRAL/UP) + softmax confidence를
+    기반으로 ``Signal`` 을 생성합니다.
     """
 
-    def __init__(self, predictor_service):
+    def __init__(self, predictor_service, confidence_threshold: float = 0.45):
         super().__init__("MLEnsemble")
         self.predictor = predictor_service
+        self.confidence_threshold = confidence_threshold
 
     def generate_signal(self, df: pd.DataFrame) -> Signal:
         if df.empty:
             return Signal('HOLD', 0.0, 0.0, reason="데이터 없음")
 
         try:
-            # Get latest features (already normalized from FeatureEngineer)
             latest_features = df.iloc[[-1]]
             close = self._get_latest(df, 'close')
 
-            # ML Prediction (0.0 to 1.0)
-            prediction = self.predictor.predict_next(latest_features)
+            # Ternary Classification: (class, confidence, probabilities)
+            predicted_class, confidence, _probs = self.predictor.predict_class(
+                latest_features
+            )
 
-            # Interpret prediction
-            if prediction > 0.7:
+            # Class 2 = UP → BUY, Class 0 = DOWN → SELL
+            if predicted_class == 2 and confidence >= self.confidence_threshold:
                 return Signal(
                     action='BUY',
-                    strength=prediction,
+                    strength=confidence,
                     price=close,
-                    reason=f"ML BUY: Score={prediction:.3f}"
+                    reason=f"ML BUY: UP conf={confidence:.2%}"
                 )
-            elif prediction < 0.3:
+            elif predicted_class == 0 and confidence >= self.confidence_threshold:
                 return Signal(
                     action='SELL',
-                    strength=1.0 - prediction,
+                    strength=confidence,
                     price=close,
-                    reason=f"ML SELL: Score={prediction:.3f}"
+                    reason=f"ML SELL: DOWN conf={confidence:.2%}"
                 )
             else:
-                return Signal('HOLD', 0.0, close, reason=f"ML 중립: {prediction:.3f}")
+                return Signal(
+                    'HOLD', 0.0, close,
+                    reason=f"ML NEUTRAL: class={predicted_class}, conf={confidence:.2%}"
+                )
 
         except Exception as e:
-            logger.error(f"ML 전략 오류: {e}", exc_info=True)
+            logger.error("ML 전략 오류: %s", e, exc_info=True)
             return Signal('HOLD', 0.0, 0.0, reason=f"오류: {e}")

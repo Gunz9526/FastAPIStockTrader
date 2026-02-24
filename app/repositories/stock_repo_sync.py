@@ -25,7 +25,7 @@ class SyncStockRepository:
         symbol: str,
         start_date: datetime,
         end_date: datetime,
-        timeframe: str = '15m'
+        timeframe: str = '1d'
     ) -> list[StockOHLCV]:
         """Get OHLCV data for symbol in date range (sync)"""
         result = self.db.execute(
@@ -42,7 +42,7 @@ class SyncStockRepository:
         self,
         symbol: str,
         date_time: datetime,
-        timeframe: str = '15m'
+        timeframe: str = '1d'
     ) -> StockOHLCV | None:
         """Get specific OHLCV bar by symbol and datetime (sync)"""
         result = self.db.execute(

@@ -1,6 +1,6 @@
 """
-실시간 15분 OHLCV 데이터 수집 및 VWAP 계산.
-활성 거래 심볼에 대해 장중에 데이터를 수집합니다.
+일봉 OHLCV 데이터 수집 및 VWAP 계산.
+활성 거래 심볼에 대해 장 마감 후 일봉 데이터를 수집합니다.
 """
 import logging
 from datetime import datetime, timedelta
@@ -17,34 +17,22 @@ from app.worker import celery_app
 
 logger = logging.getLogger(__name__)
 
-@celery_app.task(name="app.tasks.realtime_data.collect_15m_realtime")
-def collect_15m_realtime():
+@celery_app.task(name="app.tasks.realtime_data.collect_daily_ohlcv")
+def collect_daily_ohlcv():
     """
-    실시간으로 15분 OHLCV 및 VWAP 데이터를 수집합니다.
-    장중(ET 기준 9:30 - 16:00) 15분 간격으로 실행됩니다.
+    일봉 OHLCV 및 VWAP 데이터를 수집합니다.
+    장 마감 후(ET 기준 17:00) 1일 1회 실행됩니다.
     """
-    logger.info("15분 실시간 데이터 수집 시작...")
+    logger.info("일봉 데이터 수집 시작...")
 
-    # Check if market is currently open
+    # Check if market was open today
     et_tz = timezone('America/New_York')
     current_time = datetime.now(et_tz)
-    current_hour = current_time.hour
-    current_minute = current_time.minute
     day_of_week = current_time.weekday()  # 0=Monday, 6=Sunday
 
-    # Market hours: Mon-Fri, 9:30 AM - 4:00 PM ET (14:30-21:00 UTC roughly, but using local)
-    # Fixed: Allow hour 16 at minute 0 to capture the 16:00 bar
     if day_of_week > 4:  # Weekend
-        logger.info("시장 휴장(주말). 15분 수집 건너뜁니다.")
+        logger.info("시장 휴장(주말). 일봉 수집 건너뜁니다.")
         return {"status": "skipped", "reason": "weekend"}
-
-    if current_hour < 9 or (current_hour == 9 and current_minute < 30):
-        logger.info("시장 미개장. 15분 수집 건너뜁니다.")
-        return {"status": "skipped", "reason": "pre-market"}
-
-    if current_hour > 16 or (current_hour == 16 and current_minute > 0):
-        logger.info("시장 마감 이후. 15분 수집 건너뜁니다.")
-        return {"status": "skipped", "reason": "post-market"}
 
     session = SessionLocal()
     try:
@@ -53,10 +41,10 @@ def collect_15m_realtime():
         # Get active symbols
         symbols = repo.get_active_symbols()
         if not symbols:
-            logger.warning("15분 수집 대상 활성 심볼이 없습니다")
+            logger.warning("일봉 수집 대상 활성 심볼이 없습니다")
             return {"status": "no_symbols"}
 
-        logger.info(f"{len(symbols)}개 심볼에 대해 15분 데이터 수집 중")
+        logger.info(f"{len(symbols)}개 심볼에 대해 일봉 데이터 수집 중")
 
         # Initialize Alpaca client
         data_client = StockHistoricalDataClient(
@@ -64,9 +52,9 @@ def collect_15m_realtime():
             secret_key=settings.ALPACA_SECRET_KEY,
         )
 
-        # Fetch last 2 bars (30 minutes) to ensure we capture the most recent completed 15m bar
+        # Fetch last 3 trading days to ensure we capture the most recent completed daily bar
         end_time = datetime.now()
-        start_time = end_time - timedelta(minutes=30)
+        start_time = end_time - timedelta(days=5)
 
         success_count = 0
         error_count = 0
@@ -75,7 +63,7 @@ def collect_15m_realtime():
             try:
                 request = StockBarsRequest(
                     symbol_or_symbols=[symbol],
-                    timeframe=TimeFrame(15, TimeFrameUnit.Minute),
+                    timeframe=TimeFrame(1, TimeFrameUnit.Day),
                     start=start_time,
                     end=end_time,
                     feed='iex'  # Free tier compatible
@@ -84,7 +72,7 @@ def collect_15m_realtime():
                 bars_response = data_client.get_stock_bars(request)
 
                 if not bars_response or not bars_response.data:
-                    logger.debug(f"{symbol}: 15분 데이터 없음")
+                    logger.debug(f"{symbol}: 일봉 데이터 없음")
                     continue
 
                 symbol_bars = bars_response.data.get(symbol, [])
@@ -98,7 +86,7 @@ def collect_15m_realtime():
 
                 for bar in symbol_bars:
                     # Check if this bar already exists in DB (exact datetime match)
-                    existing = repo.get_ohlcv_by_datetime(symbol, bar.timestamp, timeframe='15m')
+                    existing = repo.get_ohlcv_by_datetime(symbol, bar.timestamp, timeframe='1d')
 
                     if existing:
                         # Update existing bar (in case of corrections)
@@ -123,7 +111,7 @@ def collect_15m_realtime():
                             close=float(bar.close),
                             volume=float(bar.volume),
                             adj_close=None,
-                            timeframe='15m',
+                            timeframe='1d',
                             vwap=float(bar.vwap) if hasattr(bar, 'vwap') and bar.vwap else None,
                             trade_count=int(bar.trade_count) if hasattr(bar, 'trade_count') and bar.trade_count else None
                         )
@@ -136,11 +124,11 @@ def collect_15m_realtime():
 
             except Exception as e:
                 error_count += 1
-                logger.error(f"{symbol} 15분 데이터 수집 실패: {e}")
+                logger.error(f"{symbol} 일봉 데이터 수집 실패: {e}")
                 continue
 
         session.commit()
-        logger.info(f"15분 수집 완료: 성공 {success_count}건, 오류 {error_count}건")
+        logger.info(f"일봉 수집 완료: 성공 {success_count}건, 오류 {error_count}건")
 
         return {
             'status': 'completed',
@@ -150,7 +138,7 @@ def collect_15m_realtime():
         }
 
     except Exception as e:
-        logger.error(f"15분 수집 오류: {e}", exc_info=True)
+        logger.error(f"일봉 수집 오류: {e}", exc_info=True)
         session.rollback()
         raise
     finally:

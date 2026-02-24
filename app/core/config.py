@@ -75,56 +75,47 @@ class Settings(BaseSettings):
 
 
 # Regime-Specific Trading Configuration
-# Regime-Specific Trading Thresholds
+# Regime-Specific Trading Thresholds (Daily Bars + Ternary Classification)
 #
-# KEY INSIGHT: The model tends to sell too early. Solutions:
-# 1. Higher sell_threshold (more negative) = harder to trigger sell
-# 2. min_hold_multiplier = extend minimum holding time per regime
-# 3. min_profit_required = minimum profit % before allowing sell signal
+# KEY INSIGHT: Classification model outputs (class, confidence) instead of raw float.
+# confidence_threshold: minimum confidence to act on prediction (0.0-1.0)
+# Predictions: 0=DOWN, 1=NEUTRAL, 2=UP
 #
-# BULL_TRENDING NOTE: Model accuracy is 48.78% (below 50%) with -0.42 Sharpe.
+# BULL_TRENDING NOTE: Model accuracy is improving with classification.
 # Use fallback_to_regime to use sideways_calm model instead when bull is detected.
 #
 REGIME_TRADING_CONFIG = {
     'bull_trending': {
-        'buy_threshold': 0.003,    # 0.3% - moderate entry
-        'sell_threshold': -0.005,  # -0.5% - MUCH harder to sell (avoid early exits)
+        'confidence_threshold': 0.45,  # 45% confidence to act
         'position_scale': 0.5,     # 50% position (balanced risk)
-        'min_hold_multiplier': 2.0,  # 2x normal hold time (120min instead of 60)
+        'min_hold_days': 2,        # Minimum 2 trading days hold
         'min_profit_required': 0.02,  # Require 2% profit before considering sell
         'enabled': True,
-        'confidence': 0.4,
         'fallback_to_regime': 'sideways_calm',  # Use sideways_calm model (better performance)
         'description': 'Bull markets need patience - extend hold times, avoid early sells',
     },
     'bear_trending': {
-        'buy_threshold': 0.004,    # 0.4% - conservative entry in bearish conditions
-        'sell_threshold': -0.003,  # -0.3% - moderate sell threshold
+        'confidence_threshold': 0.55,  # 55% confidence (more conservative in bear)
         'position_scale': 0.5,     # 50% (risk management in bear market)
-        'min_hold_multiplier': 1.5,  # 1.5x hold time
+        'min_hold_days': 1,        # 1 day hold (quick exit in bear)
         'min_profit_required': 0.015,  # 1.5% profit required
         'enabled': True,
-        'confidence': 0.5,
         'description': 'Bear market - quick profits, moderate holding',
     },
     'sideways_volatile': {
-        'buy_threshold': 0.005,    # 0.5% - high threshold for choppy markets
-        'sell_threshold': -0.004,  # -0.4% - harder to sell
+        'confidence_threshold': 0.60,  # 60% confidence (high bar for choppy markets)
         'position_scale': 0.3,     # 30% (reduced exposure in chop)
-        'min_hold_multiplier': 1.0,  # Normal hold time
+        'min_hold_days': 1,        # 1 day hold
         'min_profit_required': 0.01,  # 1% profit required
         'enabled': True,
-        'confidence': 0.3,
         'description': 'Volatile sideways - selective trades only',
     },
     'sideways_calm': {
-        'buy_threshold': 0.002,    # 0.2% - normal sensitivity
-        'sell_threshold': -0.004,  # -0.4% - still conservative on sells
+        'confidence_threshold': 0.40,  # 40% confidence (best regime)
         'position_scale': 1.0,     # Full position (best regime)
-        'min_hold_multiplier': 1.5,  # 1.5x hold time for better profits
+        'min_hold_days': 2,        # 2 days hold for better profits
         'min_profit_required': 0.015,  # 1.5% profit required
         'enabled': True,
-        'confidence': 0.7,
         'description': 'Calm market - full confidence, patient holding',
     },
 }

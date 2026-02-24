@@ -5,7 +5,7 @@ trigger: model_decision
 # ROLE: Backend Developer
 
 ## OBJECTIVE
-Design, implement, and maintain the server-side logic, database schema, and API endpoints for the high-frequency trading platform.
+Design, implement, and maintain the server-side logic, database schema, and API endpoints for the daily-bar algorithmic trading platform.
 
 ## RESPONSIBILITIES
 1.  **API Development**: Build high-performance, async API endpoints using FastAPI.
@@ -22,6 +22,8 @@ Design, implement, and maintain the server-side logic, database schema, and API 
 - Dependencies: SQLAlchemy 2.0 (Async), Pydantic v2, Redis, Celery.
 - All database changes via **Alembic migrations** only.
 - No direct SQL execution in application code (use repositories).
+- **No GPU dependencies** — CPU-only ML training (CatBoost/LightGBM/XGBoost). Server: 4-core, 24GB RAM.
+- All timeframes use **daily bars** (`'1d'`). No intraday/15-minute references.
 
 ## FILE OWNERSHIP
 - `app/api/**` - API endpoints

@@ -56,7 +56,7 @@ celery_app.conf.update(
         "app.tasks.portfolio.rebalance_portfolio": {"queue": "trading"},
         "app.tasks.portfolio.update_portfolio_parameters": {"queue": "trading"},
         # MEDIUM PRIORITY: Data collection (< 60s latency tolerance)
-        "app.tasks.realtime_data.collect_15m_realtime": {"queue": "data"},
+        "app.tasks.realtime_data.collect_daily_ohlcv": {"queue": "data"},
         "app.tasks.sentiment.update_sentiment_scores": {"queue": "data"},
         "app.tasks.sentiment.clear_stale_sentiment_cache": {"queue": "data"},
         "app.tasks.vix_data.collect_vix_data": {"queue": "data"},
@@ -77,22 +77,22 @@ celery_app.conf.beat_schedule = {
         "schedule": crontab(minute="30", hour="8", day_of_week="1-5"),
     },
 
-    # Market Scan (Every hour during trading hours)
+    # Market Scan (Once daily after open, 10:00 AM EST)
     "market_scan_trading_hours": {
         "task": "app.tasks.trading.execute_market_scan",
-        "schedule": crontab(minute="15", hour="9-15", day_of_week="1-5"),
+        "schedule": crontab(minute="0", hour="10", day_of_week="1-5"),
     },
 
-    # Trailing Stop Updates (Every 15 minutes during trading hours)
+    # Trailing Stop Updates (Twice daily: after open + before close)
     "update_trailing_stops": {
         "task": "app.tasks.trading.update_trailing_stops",
-        "schedule": crontab(minute="*/15", hour="9-16", day_of_week="1-5"),
+        "schedule": crontab(minute="0", hour="10,15", day_of_week="1-5"),
     },
 
-    # Real-time 15-minute OHLCV Collection (Every 15 minutes during market hours)
-    "collect_15m_realtime": {
-        "task": "app.tasks.realtime_data.collect_15m_realtime",
-        "schedule": crontab(minute="0,15,30,45", hour="9-16", day_of_week="1-5"),
+    # Daily OHLCV Collection (Post-market, 5:00 PM EST)
+    "collect_daily_ohlcv": {
+        "task": "app.tasks.realtime_data.collect_daily_ohlcv",
+        "schedule": crontab(minute="0", hour="17", day_of_week="1-5"),
     },
 
     # Daily Portfolio Parameter Update (Midnight EST, every day)
@@ -110,11 +110,12 @@ celery_app.conf.beat_schedule = {
         "schedule": crontab(minute="45", hour="15", day_of_week="1-5"),
     },
 
-    # Hourly Sentiment Analysis Update (Every hour, 24/7)
+    # Sentiment Analysis Update (Twice daily: pre-market + mid-session)
     # Fetches news from API, analyzes with Gemini, caches in Redis
+    # Reduced from 7x/day → 2x/day: sentiment is confidence adjuster (15% weight), not ML feature
     "update_sentiment_scores": {
         "task": "app.tasks.sentiment.update_sentiment_scores",
-        "schedule": crontab(minute="0", hour="9-15", day_of_week="1-5"),
+        "schedule": crontab(minute="0", hour="8,12", day_of_week="1-5"),
     },
 
     # Daily Sentiment Cache Cleanup (Midnight EST)

@@ -68,15 +68,6 @@ async def metrics_middleware(request: Request, call_next):
 
     return response
 
-# Request logging middleware
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    # Use % formatting instead of f-string for uvicorn compatibility
-    logger.info("Incoming: %s %s", request.method, request.url)
-    response = await call_next(request)
-    logger.info("Response: %s", response.status_code)
-    return response
-
 # CORS Middleware
 if settings.BACKEND_CORS_ORIGINS:
     app.add_middleware(

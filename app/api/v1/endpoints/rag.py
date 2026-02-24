@@ -160,6 +160,7 @@ async def get_stock_recommendations_for_rag(
         from app.repositories.stock_repo_sync import SyncStockRepository
         from app.ml.predictor import PredictorService
         from app.ml.features import FeatureEngineer
+        from app.ml.models import CLASS_NAMES
         from app.services.regime import RegimeDetector, MarketRegime
         from app.services.sentiment_analyzer import get_sentiment_analyzer
         from app.services.fundamental_provider import get_fundamental_provider
@@ -185,7 +186,7 @@ async def get_stock_recommendations_for_rag(
                 end_date = pd.Timestamp.now(tz='UTC')
                 start_date = end_date - pd.Timedelta(days=90)
                 
-                spy_data = repo.get_ohlcv_range('SPY', start_date, end_date, timeframe='15m')
+                spy_data = repo.get_ohlcv_range('SPY', start_date, end_date, timeframe='1d')
                 
                 if len(spy_data) >= 100:
                     spy_df = pd.DataFrame([{
@@ -222,8 +223,8 @@ async def get_stock_recommendations_for_rag(
                     end_date = pd.Timestamp.now(tz='UTC')
                     start_date = end_date - pd.Timedelta(days=30)
                     
-                    ohlcv = repo.get_ohlcv_range(symbol, start_date, end_date, timeframe='15m')
-                    if len(ohlcv) < 500:
+                    ohlcv = repo.get_ohlcv_range(symbol, start_date, end_date, timeframe='1d')
+                    if len(ohlcv) < 50:
                         continue
                     
                     df = pd.DataFrame([{
@@ -242,9 +243,16 @@ async def get_stock_recommendations_for_rag(
                         continue
                     
                     latest_features = features_df.iloc[[-1]]
-                    X_norm = feature_engineer.extract_feature_vector(latest_features)
+                    regime_suffix = current_regime.value if current_regime else 'sideways_calm'
+                    X_norm = feature_engineer.extract_feature_vector(
+                        latest_features, fit_scaler=False, feature_set="base",
+                        scaler_suffix=regime_suffix
+                    )
                     
-                    prediction = predictor.predict_next(X_norm, regime=current_regime)
+                    predicted_class, confidence, probabilities = predictor.predict_class(
+                        X_norm, regime=current_regime
+                    )
+                    class_name = CLASS_NAMES[predicted_class]
                     current_price = df['close'].iloc[-1]
                     
                     # Sentiment
@@ -258,12 +266,29 @@ async def get_stock_recommendations_for_rag(
                     # 종목 정보 가져오기
                     ticker_info = repo.get_ticker(symbol)
                     
+                    # Classification-based recommendation score:
+                    # UP(2) boosts score, DOWN(0) lowers, confidence scales
+                    direction_score = {2: 1.0, 1: 0.0, 0: -1.0}.get(predicted_class, 0.0)
+                    fundamentals_bonus = (
+                        0.10 if fundamentals and fundamentals.get('pe_ratio', 40) < 30
+                        else 0.0
+                    )
+                    recommendation_score = (
+                        direction_score * confidence * 0.75
+                        + sentiment_score * 0.15
+                        + fundamentals_bonus
+                    )
+
                     recommendations.append({
                         "symbol": symbol,
                         "name": ticker_info.name if ticker_info else symbol,
                         "sector": ticker_info.sector if ticker_info else "Unknown",
                         "current_price": round(current_price, 2),
-                        "ml_prediction": round(prediction, 5),
+                        "ml_class": class_name,
+                        "ml_confidence": round(confidence, 4),
+                        "ml_probabilities": {
+                            k: round(v, 4) for k, v in probabilities.items()
+                        },
                         "sentiment_score": round(sentiment_score, 3),
                         "fundamentals": {
                             "pe_ratio": fundamentals.get('pe_ratio') if fundamentals else None,
@@ -271,11 +296,7 @@ async def get_stock_recommendations_for_rag(
                             "roe": fundamentals.get('roe') if fundamentals else None,
                             "market_cap": fundamentals.get('market_cap') if fundamentals else None
                         },
-                        "recommendation_score": round(
-                            prediction * 0.75 + sentiment_score * 0.15 + 
-                            (0.10 if fundamentals and fundamentals.get('pe_ratio', 40) < 30 else 0.0),
-                            5
-                        )
+                        "recommendation_score": round(recommendation_score, 5)
                     })
                     
                 except Exception as e:

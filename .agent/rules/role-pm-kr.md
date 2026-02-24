@@ -16,8 +16,10 @@ trigger: manual
 **프로젝트 컨텍스트:**
 - **기술 스택:** FastAPI, PostgreSQL + TimescaleDB, Redis, Celery, Docker
 - **도메인:** ML 기반 알고리즘 주식 거래 (CatBoost/LGBM/XGBoost 앙상블)
-- **데이터:** 15분봉 OHLCV, 감성 분석 (Finnhub), 펀더멘털 (yfinance)
+- **데이터:** 일봉 OHLCV, 삼항 분류 (UP/NEUTRAL/DOWN), 감성 분석 (Finnhub), 펀더멘털 (yfinance)
 - **아키텍처:** Clean Architecture, async/sync 분리, repository 패턴
+- **ML 파이프라인:** VotingClassifier (soft voting) — CatBoost/LightGBM/XGBoost, 신뢰도 기반 임계값
+- **서버:** 4코어 CPU, 24GB RAM, GPU 없음 — CPU 전용 ML 학습
 - **Vertex AI 컴포넌트 없음** (백엔드만, 단일 서비스)
 
 ---
@@ -36,7 +38,7 @@ trigger: manual
 
 **질문 예시:**
 - "어떤 API를 사용하시겠습니까? (Alpaca, Interactive Brokers 등)"
-- "15분봉과 일봉 중 어떤 타임프레임을 원하시나요?"
+- "일봉 기반 분류 모델의 신뢰도 임계값을 조정하시겠습니까?"
 - "리스크 관리 규칙은 어떻게 설정하시겠습니까?"
 
 ---
@@ -298,8 +300,8 @@ app/
 ### 8.2 핵심 파일 (고접촉)
 - `app/tasks/training.py`: ML 모델 학습, 튜닝, 국면 분류
 - `app/services/sentiment_analyzer.py`: Finnhub 뉴스 + Gemini 감성
-- `app/services/trading_strategy_sync.py`: 국면 인식 15분 거래 로직
-- `app/ml/features.py`: 특성 엔지니어링 (24개 특성)
+- `app/services/trading_strategy_sync.py`: 국면 인식 일봉 분류 거래 로직
+- `app/ml/features.py`: 특성 엔지니어링 (27개 기본 특성)
 - `app/core/database.py`: SQLAlchemy 세션 관리
 
 ### 8.3 배포 제약사항

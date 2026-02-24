@@ -19,8 +19,8 @@ class RegimeDetector:
 
     def __init__(
         self,
-        adx_trend_threshold: float = 18.0,  # 15분봉에 맞게 낮춤 (25 → 18)
-        atr_volatility_threshold: float = 0.015,  # 15분봉에 맞게 낮춤 (3% → 1.5%)
+        adx_trend_threshold: float = 25.0,  # 일봉 기준 (ADX > 25 = 강한 추세)
+        atr_volatility_threshold: float = 0.03,  # 일봉 기준 (3% 일일 변동)
         vix_high_threshold: float = 20.0,  # VIX > 20 = 높은 공포
         vix_extreme_threshold: float = 30.0  # VIX > 30 = 극도 공포
     ):
@@ -52,7 +52,7 @@ class RegimeDetector:
             adx = float(latest.get('adx', 0))
             atr_pct = float(latest.get('atr_pct', 0))
 
-            # 가격 모멘텀 계산 (10개 바 = 15분봉 150분)
+            # 가격 모멘텀 계산 (10개 바 = 일봉 10거래일)
             if len(df) >= 10:
                 price_change_10d = (close - df['close'].iloc[-10]) / df['close'].iloc[-10]
             else:
@@ -78,10 +78,10 @@ class RegimeDetector:
             else:
                 logger.debug("VIX 미제공, ATR 기반 변동성 감지 사용")
 
-            # 레짐 분류 로직 (15분봉 기준)
-            if strong_trend and trend_up and price_change_10d > 0.005:  # 150분 내 0.5% 상승
+            # 레짐 분류 로직 (일봉 기준)
+            if strong_trend and trend_up and price_change_10d > 0.02:  # 10거래일 내 2% 상승
                 regime = MarketRegime.BULL_TRENDING
-            elif strong_trend and not trend_up and price_change_10d < -0.005:  # 150분 내 0.5% 하락
+            elif strong_trend and not trend_up and price_change_10d < -0.02:  # 10거래일 내 2% 하락
                 regime = MarketRegime.BEAR_TRENDING
             elif high_volatility:
                 regime = MarketRegime.SIDEWAYS_VOLATILE
@@ -102,100 +102,28 @@ class RegimeDetector:
             logger.error("레짐 감지 오류: %s", str(e), exc_info=True)
             return MarketRegime.SIDEWAYS_CALM
 
-# Regime-specific strategy weights
-REGIME_STRATEGY_WEIGHTS: dict[MarketRegime, dict[str, float]] = {
-    MarketRegime.BULL_TRENDING: {
-        'Momentum': 0.5,
-        'MeanReversion': 0.1,
-        'Breakout': 0.3,
-        'MLEnsemble': 0.1
+
+# Regime-specific signal weighting for trading strategy
+# Weights must sum to 1.0 for each regime
+REGIME_STRATEGY_WEIGHTS: dict[str, dict[str, float]] = {
+    'bull_trending': {
+        'ml_prediction': 0.80,   # ML very reliable in trends
+        'sentiment': 0.12,       # Sentiment confirms momentum
+        'fundamentals': 0.08,    # Less relevant in strong trends
     },
-    MarketRegime.BEAR_TRENDING: {
-        'Momentum': 0.4,
-        'MeanReversion': 0.2,
-        'Breakout': 0.1,
-        'MLEnsemble': 0.3
+    'bear_trending': {
+        'ml_prediction': 0.65,   # ML less reliable in panic
+        'sentiment': 0.15,       # Sentiment useful for reversal signals
+        'fundamentals': 0.20,    # Fundamentals anchor in fear
     },
-    MarketRegime.SIDEWAYS_VOLATILE: {
-        'Momentum': 0.1,
-        'MeanReversion': 0.4,
-        'Breakout': 0.4,
-        'MLEnsemble': 0.1
+    'sideways_volatile': {
+        'ml_prediction': 0.60,   # ML struggles with noise
+        'sentiment': 0.25,       # Sentiment contrarian signals key
+        'fundamentals': 0.15,    # Fundamentals filter overreaction
     },
-    MarketRegime.SIDEWAYS_CALM: {
-        'Momentum': 0.1,
-        'MeanReversion': 0.6,
-        'Breakout': 0.1,
-        'MLEnsemble': 0.2
-    }
+    'sideways_calm': {
+        'ml_prediction': 0.75,   # Default balanced
+        'sentiment': 0.15,       # Standard
+        'fundamentals': 0.10,    # Standard
+    },
 }
-
-# Regime-specific risk parameters
-REGIME_RISK_PARAMS: dict[MarketRegime, dict[str, float]] = {
-    MarketRegime.BULL_TRENDING: {
-        'max_position_pct': 0.15,
-        'stop_loss_mult': 2.5,
-        'take_profit_mult': 4.0,
-        'trailing_stop_mult': 2.0
-    },
-    MarketRegime.BEAR_TRENDING: {
-        'max_position_pct': 0.05,
-        'stop_loss_mult': 1.5,
-        'take_profit_mult': 2.5,
-        'trailing_stop_mult': 1.2
-    },
-    MarketRegime.SIDEWAYS_VOLATILE: {
-        'max_position_pct': 0.08,
-        'stop_loss_mult': 1.8,
-        'take_profit_mult': 2.8,
-        'trailing_stop_mult': 1.5
-    },
-    MarketRegime.SIDEWAYS_CALM: {
-        'max_position_pct': 0.12,
-        'stop_loss_mult': 2.0,
-        'take_profit_mult': 3.0,
-        'trailing_stop_mult': 1.5
-    }
-}
-
-def get_regime_strategy_weights(regime: MarketRegime) -> dict[str, float]:
-    """
-    Get strategy weights for current regime.
-    
-    Args:
-        regime: Market regime enum
-    
-    Returns:
-        Dict of strategy weights
-    """
-    if regime not in REGIME_STRATEGY_WEIGHTS:
-        logger.warning(
-            "Invalid regime '%s' provided. Using SIDEWAYS_CALM fallback. "
-            "Valid regimes: %s",
-            regime,
-            list(REGIME_STRATEGY_WEIGHTS.keys())
-        )
-        return REGIME_STRATEGY_WEIGHTS[MarketRegime.SIDEWAYS_CALM]
-
-    return REGIME_STRATEGY_WEIGHTS[regime]
-
-def get_regime_risk_params(regime: MarketRegime) -> dict[str, float]:
-    """
-    Get risk parameters for current regime.
-    
-    Args:
-        regime: Market regime enum
-    
-    Returns:
-        Dict of risk parameters
-    """
-    if regime not in REGIME_RISK_PARAMS:
-        logger.warning(
-            "Invalid regime '%s' provided. Using SIDEWAYS_CALM fallback. "
-            "Valid regimes: %s",
-            regime,
-            list(REGIME_RISK_PARAMS.keys())
-        )
-        return REGIME_RISK_PARAMS[MarketRegime.SIDEWAYS_CALM]
-
-    return REGIME_RISK_PARAMS[regime]

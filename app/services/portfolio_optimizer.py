@@ -77,14 +77,28 @@ class PortfolioOptimizer:
                 returns_data = self._get_backtest_returns(repo, symbols)
 
             # Calculate correlation
-            # Align returns to same length (use shortest length)
-            min_length = min(len(v) for v in returns_data.values())
-            if min_length == 0:
-                logger.warning("수익률 데이터 없음 — 단위 행렬을 사용합니다")
+            # Check minimum data
+            non_empty = {k: v for k, v in returns_data.items() if len(v) > 0}
+            if len(non_empty) < 2:
+                logger.warning("수익률 데이터 부족 — 단위 행렬을 사용합니다")
                 return pd.DataFrame(np.eye(len(symbols)), index=symbols, columns=symbols)
 
-            aligned_returns = {k: v[:min_length] for k, v in returns_data.items()}
-            df_returns = pd.DataFrame(aligned_returns)
+            # Align by index (date-based for backtest, position-based for live)
+            if isinstance(next(iter(non_empty.values())), pd.Series):
+                # Date-indexed Series: align on shared dates
+                df_returns = pd.concat(non_empty, axis=1).dropna()
+            else:
+                # Numpy arrays (live trades): align by shortest length
+                min_length = min(len(v) for v in non_empty.values())
+                if min_length == 0:
+                    return pd.DataFrame(np.eye(len(symbols)), index=symbols, columns=symbols)
+                aligned = {k: v[:min_length] for k, v in non_empty.items()}
+                df_returns = pd.DataFrame(aligned)
+
+            if df_returns.empty or len(df_returns) < 2:
+                logger.warning("정렬 후 데이터 부족 — 단위 행렬을 사용합니다")
+                return pd.DataFrame(np.eye(len(symbols)), index=symbols, columns=symbols)
+
             corr_matrix = df_returns.corr()
 
             # Cache for 24 hours
@@ -117,22 +131,36 @@ class PortfolioOptimizer:
 
         return returns_data
 
-    def _get_backtest_returns(self, repo, symbols: list[str]) -> dict[str, np.ndarray]:
-        """Get returns from historical OHLCV data (backtest)."""
-        returns_data = {}
+    def _get_backtest_returns(self, repo, symbols: list[str]) -> dict[str, pd.Series]:
+        """Get returns from historical OHLCV data (backtest).
+
+        Returns date-indexed Series so that correlation matrix alignment
+        uses matching timestamps rather than positional truncation.
+
+        Args:
+            repo: Repository instance
+            symbols: List of stock symbols
+
+        Returns:
+            Dict of {symbol: pd.Series} with datetime index
+        """
+        returns_data: dict[str, pd.Series] = {}
         end_date = datetime.now()
         start_date = end_date - timedelta(days=self.lookback_days)
 
         for symbol in symbols:
-            ohlcv = repo.get_ohlcv_range(symbol, start_date, end_date, timeframe='15m')
+            ohlcv = repo.get_ohlcv_range(symbol, start_date, end_date, timeframe='1d')
             if len(ohlcv) > 0:
                 df = pd.DataFrame([{
+                    'date_time': bar.date_time,
                     'close': bar.close
                 } for bar in ohlcv])
-                returns = df['close'].pct_change().dropna().values
+                df.set_index('date_time', inplace=True)
+                df.sort_index(inplace=True)
+                returns = df['close'].pct_change().dropna()
                 returns_data[symbol] = returns
             else:
-                returns_data[symbol] = np.array([0.0])
+                returns_data[symbol] = pd.Series(dtype=float)
 
         return returns_data
 
@@ -288,27 +316,52 @@ class PortfolioOptimizer:
             return 0.10  # Conservative fallback
 
     def _get_backtest_trades(self, repo, symbol: str) -> list[dict]:
-        """Simulate trades from backtest data (mock for initial period)."""
-        # Simplified: Generate mock trades based on historical returns
-        # In production, this would use actual backtest results
+        """
+        Simulate trades from backtest data using SMA crossover strategy.
+
+        Uses SMA(5) vs SMA(20) crossover on 15-min bars to generate
+        realistic trade entries/exits. Falls back to empty list when
+        insufficient data.
+
+        Args:
+            repo: Repository instance with get_ohlcv_range()
+            symbol: Stock symbol
+
+        Returns:
+            List of trade dicts with entry_price, exit_price, pnl
+        """
         end_date = datetime.now()
         start_date = end_date - timedelta(days=self.lookback_days)
 
-        ohlcv = repo.get_ohlcv_range(symbol, start_date, end_date, timeframe='15m')
-        if len(ohlcv) < 10:
+        ohlcv = repo.get_ohlcv_range(symbol, start_date, end_date, timeframe='1d')
+        if len(ohlcv) < 25:  # Need at least SMA(20) + buffer
             return []
 
-        # Mock trades: every 5th bar is a trade
-        trades = []
-        for i in range(0, len(ohlcv) - 5, 5):
-            entry = ohlcv[i]
-            exit_bar = ohlcv[i + 5]
-            pnl = (exit_bar.close - entry.close) / entry.close
-            trades.append({
-                'entry_price': entry.close,
-                'exit_price': exit_bar.close,
-                'pnl': pnl
-            })
+        closes = [bar.close for bar in ohlcv]
+
+        # Simple SMA crossover: SMA(5) vs SMA(20)
+        trades: list[dict] = []
+        in_trade = False
+        entry_price = 0.0
+
+        for i in range(20, len(closes)):
+            sma_fast = sum(closes[i - 5:i]) / 5
+            sma_slow = sum(closes[i - 20:i]) / 20
+
+            if not in_trade and sma_fast > sma_slow:
+                # Entry signal: fast crosses above slow
+                entry_price = closes[i]
+                in_trade = True
+            elif in_trade and sma_fast < sma_slow:
+                # Exit signal: fast crosses below slow
+                exit_price = closes[i]
+                pnl = (exit_price - entry_price) / entry_price
+                trades.append({
+                    'entry_price': entry_price,
+                    'exit_price': exit_price,
+                    'pnl': pnl
+                })
+                in_trade = False
 
         return trades
 
@@ -344,7 +397,7 @@ class PortfolioOptimizer:
 
             mean_returns = {}
             for symbol in symbols:
-                ohlcv = repo.get_ohlcv_range(symbol, start_date, end_date, timeframe='15m')
+                ohlcv = repo.get_ohlcv_range(symbol, start_date, end_date, timeframe='1d')
                 if len(ohlcv) > 0:
                     df = pd.DataFrame([{'close': bar.close} for bar in ohlcv])
                     returns = df['close'].pct_change().dropna()

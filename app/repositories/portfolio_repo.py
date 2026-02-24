@@ -223,7 +223,7 @@ class PortfolioRepository:
         symbol: str,
         start_date: datetime,
         end_date: datetime,
-        timeframe: str = '15m'
+        timeframe: str = '1d'
     ) -> list:
         """
         Get OHLCV data for correlation/VaR calculations.
@@ -232,7 +232,7 @@ class PortfolioRepository:
             symbol: Stock symbol
             start_date: Start date
             end_date: End date
-            timeframe: '15m' or '1d'
+            timeframe: '1d' or '15m'
         
         Returns:
             List of OHLCV objects

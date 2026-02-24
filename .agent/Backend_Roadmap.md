@@ -1,492 +1,255 @@
 # Backend Roadmap 🚀
 
-This roadmap outlines the systematic evolution of the FastAPI Stock Trader backend.
-Current Status: **Phase E (Production Hardening) & F (Advanced AI) Preparation**
+> **Last Updated**: 2026-02-25 (Session 10) | **Current Phase**: 🟡 Phase J (J.1/J.2 ✅, J.2.1 ✅, J.3.1 ✅, J.3.2 Model Diagnostics ✅, J.3 pending re-execution)
+> **Stack**: Python 3.14 · FastAPI · PostgreSQL/TimescaleDB · Redis · Celery · CatBoost+LightGBM+XGBoost
+> **Server**: 4-core CPU, 24GB RAM, no GPU
+> **Classification**: Ternary (UP=2 / NEUTRAL=1 / DOWN=0), θ=0.005, Daily bars (1d), 27 features
 
 ---
 
-## ✅ Completed Phases (History)
+## ✅ Completed Phases (A–I Summary)
 
-### Phase A: Core Trading System
-- [x] **FastAPI Setup** (Clean Architecture, Async/Sync separation)
-- [x] **Database** (PostgreSQL + TimescaleDB, SQLAlchemy)
-- [x] **Alpaca API** (Market Data & Trade Execution Integration)
-- [x] **Features** (TA-Lib Technical Indicators)
-
-### Phase B: Reliability & Automation
-- [x] **Celery Task Queue** (Redis Broker, Synchronous Worker Mode)
-- [x] **Scheduler** (Celery Beat Configuration)
-- [x] **Docker Security** (Non-root user, Vulnerability scanning)
-
-### Phase C: Performance Optimization (Latency & Throughput)
-- [x] **DB Optimization** (TimescaleDB Hypertables, Continuous Aggregates)
-- [x] **Caching Layer** (Redis for OHLCV, Positions, Account info with TTL)
-- [x] **Connection Pooling** (SQLAlchemy QueuePool, PgBouncer readiness)
-- [x] **Monitoring** (Prometheus Metrics, Health Checks)
-
-### Phase D: ML Core (Training & Tuning)
-- [x] **Model Architecture** (Ensemble: CatBoost + LGBM + XGBoost)
-- [x] **Hyperparameter Tuning** (Optuna Framework, Dynamic Sharpe:F1 Ratio)
-- [x] **Data Strategy** (24-month Rolling Window, TimeSeriesSplit)
-- [x] **Feature Engineering** (TA-Lib 15+ indicators)
-- [x] **Backtesting System** (Backtrader engine, CLI verification)
+| Phase | Name | Key Deliverables | Completed |
+|-------|------|-----------------|-----------|
+| A | Core Trading System | FastAPI + PostgreSQL/TimescaleDB + Alpaca API + TA-Lib | 2025 |
+| B | Reliability & Automation | Celery/Redis task queue, Beat scheduler, Docker security | 2025 |
+| C | Performance Optimization | TimescaleDB hypertables, Redis caching, Prometheus metrics | 2025 |
+| D | ML Core | Ensemble (CatBoost+LGBM+XGB), Optuna tuning, Backtrader engine | 2025 |
+| CI/CD | Build Pipeline | Conda env, GitHub Actions 3min build, Docker multi-stage, Python 3.14 | 2026-01-22 |
+| E | Production Hardening | Basic circuit breaker, Redis persistence, test infra (44 tests, 58%) | Partial |
+| F | Advanced AI | Sentiment (Gemini+Finnhub), Fundamentals (yfinance), VIX regime, Monte Carlo | 2026-01-05 |
+| G | Daily Bar + Classification | 14+ file daily conversion, VotingClassifier(soft), confidence_threshold per regime | 2026-02-24 |
+| H | Market Regime Awareness | 4-regime detection (SPY), regime-specific classifiers, bull fallback, 27 features | 2026-02-24 |
+| I | Risk & Position Defense | Min hold 2d, cooldown 1d, Kelly sizing, MPT optimization, 5-position portfolio | 2026-01-05 |
 
 ---
 
-## CI/CD Infrastructure (Completed 2026-01-22) ✅
+## 📊 Session History
 
-**Goal**: Fast and reliable GitHub Actions pipeline for Python 3.14 + CatBoost.
-
-### Build Optimization
-- [x] **Conda-based Dependency Management**
-  - Migrated from pip to conda for Python 3.14 compatibility
-  - Created `environment.yml` for reproducible environments
-  - CatBoost installation: Source build (40min) → Pre-built wheel (2min)
-- [x] **GitHub Actions Workflow**
-  - Implemented `conda-incubator/setup-miniconda@v3`
-  - Added `shell: bash -el {0}` for conda environment activation
-  - Separated conda packages (catboost, numpy, pandas) from pip packages
-- [x] **Dockerfile Multi-stage Build**
-  - Optimized layer caching with environment.yml first
-  - Added CatBoost installation verification step
-  - Build time: 15-20min → 5-7min
-- [x] **Version Pinning**
-  - Python: Fixed to 3.14.x (`requires-python = "==3.14.*"`)
-  - CatBoost: 1.2.8 from conda-forge (catboost-1.2.8-cpu_py314hf729cd6_6.conda)
-  - Channel priority: conda-forge (strict)
-
-**Impact:**
-- GitHub Actions build time: 40min (timeout) → 3min (93% reduction)
-- Docker build time: 15min → 6min (60% reduction)
-- CI/CD reliability: 0% success → 100% success
+| Session | Date | Summary |
+|---------|------|---------|
+| 1 | 2026-01-05 | Core infrastructure: Sentiment(Gemini+Finnhub), Fundamentals(yfinance), VIX, Feature Engineering, Monte Carlo |
+| 2 | 2026-01-06 | Gemini SDK migration, Feature pipeline fix, SQL logging, Sector lookup |
+| 3 | 2026-01-19 | 8 audit fixes: Redis persistence, Optuna multi-objective, Trailing stops, Backtest regime, Kelly+Correlation fixes |
+| 4 | 2026-02-23 | 7 audit fixes: Signal normalization, Thread safety, Transaction isolation, Hardcoded paths, Celery retry, Strategy analysis |
+| 5 | 2026-02-24 | Daily bar conversion (14+ files), Ternary Classification (models.py/training.py/predictor.py/config.py/trading_strategy_sync.py) |
+| 6 | 2026-02-24 | Classification cleanup: Backtest ml_strategy.py, RAG endpoint, predictor.retrain(), strategies.py, Rule personas, Roadmap overhaul |
+| 7 | 2026-02-24 | Phase J prep: 60-symbol GICS expansion, backfill_ohlcv daily support, sector_map 17→62 symbols (Unknown 99→12), Native categorical encoding (CatBoost/LightGBM/XGBoost + Ensemble), symbol_limit 10→None |
+| 8 | 2026-02-24 | **8 critical bug fixes**: LightGBM categorical predict mismatch, feature_set legacy→base, CatBoost empty data cascade, regime params JSON structure, single scaler overwrite→regime-specific, tuning wrong feature_set, regime param files never loaded, relative_volume always 1.0. + Inference path scaler-regime alignment (6 files, 0 errors) |
+| 9 | 2026-02-24 | **Training result analysis + 4 fixes**: Data Leakage removal (holdout validation), NEUTRAL class recovery (CLASS_WEIGHTS 0.5→1.0), θ adjustment (0.003→0.005), min_samples 300→500. Dead code cleanup (6 unused imports removed) |
+| 10 | 2026-02-25 | **Model diagnostics + sentiment optimization**: Regime-specific CLASS_WEIGHTS (bear NEUTRAL 1.5×), training report overhaul (Sharpe→NEUTRAL_R/F1/classification_report), feature importance top-10 logging, sentiment schedule 7×→2×/day |
 
 ---
 
-## Code Quality & Cleanup (Ongoing)
+## 🔍 Audit Status
 
-**Goal**: Maintain high code quality through refactoring, optimization, and best practices.
+### Resolved: 19/19 P0 + 16/19 Total Original Items ✅
 
-### Completed Improvements (2026-01-05) ✅
-- [x] **Unused Parameter Cleanup**
-  - `app/tasks/training.py::_train_regime_specific_models`: Removed `repo: SyncStockRepository` and `end_date: pd.Timestamp` parameters
-  - Inlined `_walk_forward_validation` logic (15 lines TimeSeriesSplit)
-  - Result: Cleaner function signatures, no unused variables
-- [x] **Sector Lookup Priority Reversal**
-  - `app/ml/sector_map.py::get_sector()`: Changed to API-first strategy
-  - Priority: yfinance API (real-time) → Manual SECTOR_MAP (fallback)
-  - Rationale: Real-time data more accurate than static mapping
-- [x] **Backfill Script Creation**
-  - `scripts/backfill_sectors.py`: 70-line script for existing symbols
-  - Usage: `docker compose exec app python scripts/backfill_sectors.py`
-  - Purpose: Update sector data for symbols with NULL sector_id
+| ID | Issue | Resolution | Session |
+|----|-------|-----------|---------|
+| P0-2.1 | Model performance | Daily + Ternary Classification | 5 |
+| P0-2.2 | Feature mismatch | base_feature_columns 27=27 (training=inference) | 5 |
+| P0-2.3 | Position sizing | Dynamic Kelly / confidence-based | 3+5 |
+| P0-2.4 | Signal normalization | Classification replaces signal weighting | 4+5 |
+| P0-2.5 | Scaler look-ahead bias | Per-fold scaling in WF validation | 5 |
+| P1-3.1 | Regime O(N) | Vectorized | 3 |
+| P1-3.2 | Thread safety | RLock + atomic reload | 4 |
+| P1-3.3 | RiskManager persistence | Redis | 3 |
+| P1-3.4 | Dead code REGIME_STRATEGY_WEIGHTS | Kept for Dual-Timeframe future use | 4 |
+| P1-3.5 | Trailing stops | Full ATR-based implementation | 3 |
+| P1-3.6 | Backtest alignment | predict_class() + confidence | 6 |
+| P2-4.1 | Double logging | Removed | 3 |
+| P2-4.2 | Transaction isolation | Distributed locks on all order paths | 4 |
+| P2-4.3 | Kelly mock data | SMA crossover strategy | 3 |
+| P2-4.4 | Correlation alignment | Date-indexed | 3 |
+| P2-4.5 | Optuna multi-objective | Composite score (Sharpe+Accuracy+MaxDD) | 3 |
+| P3-5.2 | Hardcoded paths | env var (`MODEL_SAVE_PATH`) | 4 |
+| P3-5.3 | Celery retry | autoretry on 5 tasks | 4 |
 
-### Critical Fixes (2026-01-06) ✅
-- [x] **Gemini API Migration** (google-generativeai → google-genai)
-  - Migrated from deprecated `google-generativeai` to official `google-genai>=1.33.0` SDK
-  - Updated `app/services/sentiment_analyzer.py`: Client-based API pattern
-  - Import change: `from google import genai` → `genai.Client(api_key=...)`
-  - Model update: `gemini-pro` → `gemini-2.0-flash-exp`
-  - API call: `client.models.generate_content(model=..., contents=...)`
-- [x] **Feature Pipeline Fix** (Training KeyError Resolution)
-  - Added `base_feature_columns` property to `FeatureEngineer` (19 technical indicators)
-  - Separated training features (base) vs prediction features (full 24 with Phase F)
-  - Updated `app/tasks/training.py` line 95: Use `base_feature_columns` for historical data
-  - Updated `app/tasks/training.py` line 667: Feature importance uses `base_feature_columns`
-  - Root cause: Phase F features (sentiment, fundamentals) not in historical OHLCV data
-- [x] **SQL Logging Reduction**
-  - Disabled SQLAlchemy echo in `app/core/database.py` (both async and sync engines)
-  - Changed `echo=settings.ENV_STATE == "dev"` → `echo=False`
-  - Logging now controlled by `app/core/logging.py` configuration only
-  - Result: Clean logs, SQL statements only appear when needed
+### Remaining (3 items)
 
-### CI/CD Pipeline Fixes (2026-01-22) ✅
-- [x] **GitHub Actions Conda Environment Activation**
-  - Removed deprecated `auto-activate-base: false` parameter from `setup-miniconda@v3`
-  - Added `shell: bash -el {0}` to all lint and test steps
-  - Fixed exit code 127 (command not found) errors in CI/CD
-  - Impact: Ruff and mypy now execute in activated conda environment
-- [x] **Training Pipeline Bug Fix**
-  - Fixed `app/tasks/training.py` line 348: `predictor.load_model(regime)` → `predictor.get_model(regime)`
-  - Root cause: PredictorService only has `get_model()` method, not `load_model()`
-  - Impact: Model validation step now works correctly
-
-### Testing Infrastructure (2026-01-22) ✅
-- [x] **Python 3.14 Asyncio Modernization**
-  - Removed deprecated `asyncio.get_event_loop_policy().new_event_loop()` from conftest.py
-  - Migrated to pytest-asyncio automatic event loop management
-  - No custom event_loop fixture needed (pytest-asyncio handles it)
-  - Impact: Future-proof test infrastructure for Python 3.14+
-- [x] **Integration Test Suite** (NEW - 11 tests added)
-  - Created `tests/test_training_integration.py` (450+ lines)
-  - Full workflow tests: train_models, tune_models, _load_and_prepare_data
-  - Mock-based DB/API testing (no external dependencies)
-  - Scenarios: Normal flow, edge cases (no symbols, insufficient data), Optuna tuning
-  - Coverage: Training pipeline end-to-end ~65%
-- [x] **Test Count Growth**
-  - Before: 33 tests (19 original + 14 regime tests)
-  - After: 44 tests (+11 integration tests)
-  - Coverage increase: 45% → 58% (estimated)
-  - Test files: 5 → 6 (new: test_training_integration.py)
-
-### Pending Improvements (Low Priority)
-- [ ] **DB Index Optimization**
-  - Remove redundant index: `ix_stock_ohlcv_symbol` (covered by composite index)
-  - Add composite index: `idx_ohlcv_timeframe_symbol_time` for multi-timeframe queries
-  - Add partial index: `WHERE vwap IS NOT NULL` for VWAP-specific queries
-- [ ] **Code Duplication Analysis**
-  - Identify similar logic across services
-  - Extract common patterns to utility functions
-- [ ] **Type Hints Enhancement**
-  - Add missing type hints to legacy functions
-  - Enable strict mypy checking
+| ID | Issue | Target | Priority |
+|----|-------|--------|----------|
+| P2 | Test coverage 58% | 70%+ | Medium (Phase K.2) |
+| P3 | DB index optimization | Partial indexes | Low (Phase N) |
+| P3 | Dead code review | Remove truly unused code | Low (Phase N) |
 
 ---
 
-## Phase E: Production Hardening (Current Focus)
+## 🔜 Phase J: Data Backfill & Model Training (NEXT IMMEDIATE)
 
-**Goal**: Ensure the system runs autonomously and robustly in a live environment.
+> **Prerequisite**: No models exist yet for daily classification. Must complete before anything else.
 
-**Status**: 20% Complete (Infrastructure ready, operational features pending)
+### J.1 Daily OHLCV Backfill ✅ (Session 7)
+- [x] Update `scripts/backfill_ohlcv.py` to support `timeframe='1d'` (default)
+- [x] Added `--timeframe` CLI arg: `1d` | `15m` | `1h`
+- [x] Expand symbol universe: 10 → 60 symbols (11 GICS sectors + 2 Market Index ETFs)
+- [x] Target: 2+ years daily data per symbol (≈500 bars each)
+- [x] Sector diversification: all 11 GICS sectors represented
+- [x] `verify_backfill()` efficient SQL COUNT/MIN/MAX query
+- **Files**: `scripts/backfill_ohlcv.py`, `scripts/add_symbols.py`
+- **Run**: `python scripts/add_symbols.py` → `python scripts/backfill_ohlcv.py --years 2 --timeframe 1d`
 
-### E.1 Operational Reliability (Priority: HIGH)
-- [ ] **Circuit Breakers Enhancement** (Next Task)
-  - Current: Basic RiskManager checks (cooldown, min profit)
-  - Planned: Portfolio-level circuit breakers
-    - Daily loss limit: -3% or -$500 (whichever first)
-    - API latency threshold: > 3000ms → halt trading
-    - Consecutive loss limit: 3 losses in 1 hour → pause
-  - Implementation: `app/services/circuit_breaker.py` expansion
-  - Estimated: 2-3 days
-- [ ] **Alerting System** (Discord/Slack Webhook)
-  - Notify on: Trade Execution, Critical Errors, Risk Limits
-  - Priority: MEDIUM (after circuit breakers)
-- [ ] **Alpaca WebSocket** (Real-time Order Updates)
-  - Replace polling with event-driven updates for filled orders
-  - Priority: LOW (current polling works, optimization only)
+### J.2 Symbol Universe Expansion ✅ (Session 7)
+- [x] 60 symbols: Tech(12), CommSvc(4), ConsCycl(6), ConsDef(5), Fin(6), Health(6), Energy(4), Ind(6), BasMat(3), RE(3), Util(3), MktIdx(2)
+- [x] `sector_map.py`: 17→62 entries, SECTOR_TO_ID contiguous 0–12, `NUM_SECTORS=13`
+- [x] GOOGL/META → Communication Services, AMZN → Consumer Cyclical (GICS-correct)
+- [x] **Native categorical encoding**: CatBoost (Ordered Target Stats), LightGBM (native categorical), XGBoost (enable_categorical)
+- [x] Ensemble `_train_with_categorical()`: per-estimator training with correct dtype/params
+- [x] `training.py` symbol_limit: 10 → None (use all active symbols)
+- **Files**: `scripts/add_symbols.py`, `app/ml/sector_map.py`, `app/ml/features.py`, `app/ml/models.py`, `app/tasks/training.py`
 
-### E.2 Infrastructure High Availability
-- [ ] **PostgreSQL Replication** (Primary-Replica Setup Plan)
-- [ ] **Redis Persistence** (AOF/RDB Policy Check)
-- [ ] **Log Aggregation** (Centralized logging setup plan)
+### J.2.1 Training Pipeline Bug Fixes ✅ (Session 8)
+- [x] **Bug 1 (CRITICAL)**: LightGBM categorical_feature mismatch — added `_prepare_categorical_for_predict()` to all predict/predict_proba methods
+- [x] **Bug 2 (CRITICAL)**: feature_set "legacy" (25 features) → "base" (27 features) in validation and tuning paths
+- [x] **Bug 3 (CRITICAL)**: CatBoost empty data cascade — fixed by resolving Bug 2
+- [x] **Bug 4 (CRITICAL)**: Regime-tuned params JSON structure mismatch — `_load_regime_params()` with 5-level fallback
+- [x] **Bug 5 (HIGH)**: Single `feature_scaler.pkl` overwritten by all regimes — `scaler_suffix` parameter for regime-specific scalers
+- [x] **Bug 6 (HIGH)**: Tuning used wrong feature_set — added `feature_set="base"` to `tune_models()` and `_tune_models_global()`
+- [x] **Bug 7 (HIGH)**: Regime-specific param files never loaded — merged into Bug 4 fix
+- [x] **Bug 8 (MEDIUM)**: `relative_volume` always 1.0 during training — conditional overwrite only when not pre-computed
+- [x] **Inference path fix**: `scaler_suffix` added to ALL 4 inference callers (trading_strategy_sync ×2, backtest, RAG endpoint)
+- [x] **Scaler-model alignment**: Fallback regime resolved BEFORE scaling so scaler matches model's regime
+- **Files**: `app/ml/models.py`, `app/ml/features.py`, `app/tasks/training.py`, `app/services/trading_strategy_sync.py`, `app/backtest/ml_strategy.py`, `app/api/v1/endpoints/rag.py`
 
----
+### J.3.1 Validation Integrity & NEUTRAL Recovery ✅ (Session 9)
+- [x] **Data Leakage removed**: Holdout 20% split BEFORE training, true OOS validation metrics
+- [x] **Production model**: Still trained on 100% data after validation, best of both worlds
+- [x] **NEUTRAL class recovered**: CLASS_WEIGHTS {0:1.5, 1:0.5, 2:1.5} → {0:1.3, 1:1.0, 2:1.3}
+- [x] **θ widened**: CLASSIFICATION_THRESHOLD 0.003 → 0.005 (±0.5% daily, reduces noise trades)
+- [x] **min_samples raised**: 300 → 500 (sideways_volatile falls back to sideways_calm)
+- [x] **Dead code cleanup**: Removed 6 unused imports (log_loss, PredictorService, discord_notifier, CatBoostWrapper, LGBMWrapper, XGBoostWrapper)
+- **Files**: `app/tasks/training.py`, `app/ml/models.py`
+- **Expected next training results**: accuracy ~45-55% (honest OOS), NEUTRAL predictions ~15-25%
 
-## 🔮 Phase F: Advanced AI Capabilities (95% Complete)
+### J.3.2 Model Diagnostics & Regime Weight Tuning ✅ (Session 10)
+- [x] **Sentiment schedule optimized**: 7×/day → 2×/day (8AM, 12PM EST), saves Finnhub+Gemini API quota
+- [x] **Training report overhaul**: Removed vestigial Sharpe column → Added F1, NEUTRAL_Recall, classification_report, feature importance top-10
+- [x] **Regime-specific CLASS_WEIGHTS**: bull{0:1.3,1:1.2,2:1.0}, bear{0:1.0,1:1.5,2:1.3}, sideways{0:1.2,1:1.3,2:1.0}
+- [x] **Per-class metrics**: sklearn classification_report logged per regime after holdout validation
+- [x] **Feature importance**: Production ensemble top-10 features logged + saved in report
+- **Files**: `app/tasks/training.py`, `app/worker.py`
 
-**Goal**: Transform from a "Technical Trader" to an "AI Hedge Fund" with Sentiment, Fundamentals, and Advanced Analytics.
-
-### F.1 Sentiment Analysis Integration (100% Complete) ✅
-*Real-time news sentiment with AI-powered analysis*
-- [x] **SentimentAnalyzer Service** (Completed 2026-01-05)
-  - Gemini API integration with JSON parsing
-  - Redis caching (1-hour TTL): `sentiment:{symbol}`
-  - Sentiment score: -1.0 (극도 부정) to +1.0 (극도 긍정)
-  - Regime-weighted adjustment: Bull favors positive, Bear favors negative
-- [x] **Celery Automation** (Completed 2026-01-05)
-  - `update_sentiment_scores`: Hourly updates (crontab: `minute=0, hour=*`)
-  - `clear_stale_sentiment_cache`: Daily cleanup (midnight)
-- [x] **Feature Integration** (Completed 2026-01-05)
-  - Added `sentiment_score` to ML feature vector (20th feature)
-  - `add_sentiment_and_fundamentals()` convenience method
-- [x] **Finnhub Integration** (Completed 2026-01-05)
-  - Premium financial news API (Reuters, Bloomberg, WSJ, etc.)
-  - Endpoint: GET /v1/company-news
-  - Free tier: 60 calls/minute (sufficient for hourly updates)
-  - Production: $59/month (Professional plan)
-  - Top 10 articles per symbol (sorted by datetime)
-  - Response: headline, summary, source, url, datetime
-  - Error handling: RequestException, timeout (10s)
-  - Superior news quality vs NewsAPI.org
-
-### F.2 Fundamental Metrics Integration (100% Complete) ✅
-*Enhanced feature engineering with financial health metrics*
-- [x] **FundamentalDataProvider Service** (Completed 2026-01-05)
-  - yfinance API integration with LRU cache (maxsize=500, 24h TTL)
-  - Metrics: PE Ratio, PB Ratio, ROE, Dividend Yield, Market Cap, Beta
-  - Stock categorization: VALUE, GROWTH, INCOME, BLEND, UNKNOWN
-  - Risk-adjusted score: `(ROE / PE) * (1 + Div_Yield) / Beta`
-- [x] **Feature Integration** (Completed 2026-01-05)
-  - Added 4 fundamental features: `pe_ratio`, `pb_ratio`, `roe`, `beta`
-  - Default values: PE=15.0, PB=3.0, ROE=0.10, Beta=1.0 (market averages)
-  - Total features: 20 → 24 (including sentiment)
-- [x] **Sector Auto-Fetch** (Completed 2026-01-05)
-  - Priority: yfinance API → Manual SECTOR_MAP fallback
-  - LRU cache (maxsize=1000) prevents excessive API calls
-  - 11 sector categories + Unknown=99
-  - Backfill script: `scripts/backfill_sectors.py`
-
-### F.3 VIX Integration & Regime Enhancement (100% Complete) ✅
-*Volatility Index for improved regime detection*
-- [x] **VIX Data Collection** (Completed 2026-01-05)
-  - Celery task: `collect_vix_data` (daily 6:30 AM EST)
-  - Alpaca API: Daily VIX bars (symbol: 'VIX')
-  - Storage: PostgreSQL (historical) + Redis (latest value, 24h TTL)
-- [x] **Regime Detection Enhancement** (Completed 2026-01-05)
-  - `RegimeDetector.detect_regime(vix_value=Optional[float])`
-  - VIX thresholds: >30 (extreme fear), >20 (high fear)
-  - VIX overrides ATR for volatility classification
-  - Logging: VIX value included in regime detection logs
-- [x] **VIX Interpretation**
-  - VIX < 12: Low volatility (calm market)
-  - VIX 12-20: Normal volatility
-  - VIX 20-30: Elevated volatility (high fear)
-  - VIX > 30: Extreme volatility (panic)
-
-### F.4 Advanced Analytics (100% Complete) ✅
-*Feature importance and portfolio stress testing*
-- [x] **Feature Importance Analysis** (Completed 2026-01-05)
-  - Celery task: `analyze_feature_importance`
-  - Extraction from tree-based models (CatBoost, LGBM, XGBoost)
-  - Weighted average using ensemble weights
-  - Output: PNG plot (top 15 features) + JSON data
-  - Files: `feature_importance_{regime}.png`, `feature_importance_{regime}.json`
-- [x] **Monte Carlo Simulation** (Completed 2026-01-05)
-  - `MonteCarloSimulator` class (10,000 simulations, 252 days)
-  - Portfolio simulation: Cholesky decomposition for correlated returns
-  - Single-asset simulation: Geometric Brownian Motion (GBM)
-  - Risk metrics: VaR (95%), CVaR, probability of loss, percentiles
-  - Use case: Portfolio stress testing and scenario analysis
-
-**Phase F Status: 100% Complete** ✅
+### J.3 Initial Model Training (Est: 1 day)
+- [ ] Run `train_models` Celery task with daily data (after J.3.2 fixes)
+- [ ] Generate `ensemble_classifier_{regime}.pkl` (4 files)
+- [ ] Validate: accuracy ≥ 45% OOS, F1 weighted ≥ 0.40 per regime, NEUTRAL recall ≥ 15%
+- [ ] Log class distribution (check for imbalance: DOWN/NEUTRAL/UP ratio)
+- [ ] CPU estimate: ~2–4 hours per training run on 4-core server
+- **Files**: `app/tasks/training.py`, `model_artifacts/`
 
 ---
 
-## 🎯 Phase G: Real-Time 15-Minute Trading (Completed 2026-01-04)
+## 📋 Phase K: Production Hardening (After J)
 
-**Goal**: Enable intraday trading with 15-minute bars and real-time data collection.
+### K.1 Circuit Breaker Enhancement (Est: 2–3 days)
+- [ ] Daily loss limit: -3% or -$500 (whichever first)
+- [ ] Consecutive loss limit: 3 in 1 day → pause trading
+- [ ] API latency monitoring: >3000ms → halt
+- [ ] Discord/Slack alerting on breaker triggers
+- **File**: `app/services/circuit_breaker.py`
 
-### G.1 Real-Time Data Collection
-- [x] **15-Minute OHLCV Collection** (Completed 2026-01-04)
-  - Celery task: `collect_15m_realtime` (every 15 min during market hours 9:00-15:00 ET)
-  - Alpaca integration: VWAP and trade_count fields added
-  - Market hours validation (weekday check, 9:30 AM - 4:00 PM ET)
-
-### G.2 VWAP Feature Engineering
-- [x] **VWAP Distance Feature** (Completed 2026-01-04)
-  - Formula: `(close - vwap) / vwap`
-  - Interpretation: Institutional benchmark comparison
-  - Total features: 19 → 20 (added vwap_distance)
-
-### G.3 Trading Logic 15m Conversion
-- [x] **SyncTradingStrategy 15m Mode** (Completed 2026-01-04)
-  - Timeframe: '15m' (was '1d')
-  - Minimum bars: 500 (≈5 trading days)
-  - Thresholds adjusted: 0.5% → 0.2% (intraday sensitivity)
-  - Logging: [15m] tag added
-
-### G.4 Celery Beat Schedule
-- [x] **15-Minute Collection Schedule** (Completed 2026-01-04)
-  - Crontab: `minute=0,15,30,45 hour=9-15 day_of_week=1-5`
-  - Worker: app.tasks.realtime_data included
-  - Frequency: 4 times/hour, 7 hours/day, weekdays only
+### K.2 Test Coverage → 70% (Est: 3–4 days)
+- [ ] Priority targets: `predictor.py` (predict_class), `features.py`, `portfolio_optimizer.py`
+- [ ] Add classification-specific tests: class weights, confidence scores, feature count 27
+- [ ] Update `test_training_integration.py` for classifier pipeline
+- [ ] Current: 44 tests (~58%) → Target: ~65 tests (70%+)
 
 ---
 
-## 🧠 Phase H: Market Regime Awareness (Partial Complete 2026-01-04)
+## 📋 Phase L: Dual-Timeframe Hybrid (Mid-term, after K)
 
-**Goal**: Adaptive AI that responds to market conditions (Bull, Bear, Volatile, Calm).
+> **Dependency**: Phase J (models trained) + Phase K (production-safe)
 
-### H.1 Regime Detection Integration
-- [x] **RegimeDetector Integration** (Completed 2026-01-04)
-  - Method: `detect_market_regime()` in SyncTradingStrategy
-  - Reference: SPY 15m data (90 days lookback)
-  - Metrics: ADX > 25 (trend), ATR% > 3% (volatility), SMA50 (direction)
-  - Output: 4 regimes (BULL_TRENDING, BEAR_TRENDING, SIDEWAYS_VOLATILE, SIDEWAYS_CALM)
+### L.1 Daily ML Signal Cache (Est: 1–2 days)
+- [ ] Redis cache: daily prediction (class + confidence + probs), 24h TTL
+- [ ] Celery task: `generate_daily_signals` at 17:30 ET (after data collection)
 
-### H.2 Regime-Aware Prediction
-- [x] **PredictorService Multi-Model Support** (Completed 2026-01-04)
-  - Model loading: 4 regime-specific pkl files or generic fallback
-  - Method: `predict_next(features, regime=MarketRegime.SIDEWAYS_CALM)`
-  - Fallback: Generic model if regime models missing
+### L.2 15min Rule-Based Entry Layer (Est: 5–7 days)
+- [ ] Entry rules: RSI < 35 + MACD cross-up (when daily signal = UP)
+- [ ] Exit rules: Trailing stop or immediate (when daily signal = DOWN)
+- [ ] New class: `DualTimeframeOrchestrator`
+- [ ] Requires: 15min data collection re-enabled (market hours only)
 
-### H.3 Regime-Specific Model Training
-- [x] **Training Pipeline Regime Classification** (Completed 2026-01-04)
-  - Classify historical data by regime (SPY-based detection)
-  - Split data into 4 regime datasets (minimum 1000 samples each)
-  - Train 4 ensemble models: `ensemble_model_{regime}.pkl`
-  - Walk-Forward validation per regime
-  - Implementation: _train_regime_specific_models() in training.py
-
-### H.4 Bull Regime Enhancement (Completed 2026-01-23) ✅
-*Critical fix for underperforming bull_trending model (49% accuracy, -0.22 Sharpe)*
-- [x] **Feature Importance Analyzer** (Completed 2026-01-23)
-  - New utility: `app/ml/feature_analyzer.py` (FeatureImportanceAnalyzer class)
-  - Extracts importance from CatBoost, LightGBM, XGBoost models
-  - Weighted averaging based on ensemble composition
-  - JSON export and PNG visualization support
-  - Usage: `FeatureImportanceAnalyzer.from_models(models).get_report()`
-- [x] **Bull-Market Momentum Features** (Completed 2026-01-23)
-  - 6 new features: momentum_5, momentum_10, rsi_momentum, trend_strength, price_position, breakout_flag
-  - Feature count: 21 → 27 base features
-  - Rationale: Bull markets require different technical indicators than mean-reversion
-  - Implementation: `app/ml/features.py::_add_momentum_features()`
-- [x] **Regime-Specific Trading Thresholds** (Completed 2026-01-23)
-  - ADR: ADR-001-Regime-Specific-Trading-Thresholds.md
-  - Config: `REGIME_TRADING_CONFIG` in `app/core/config.py`
-  - Thresholds:
-    - bull_trending: 0.4% buy, -0.1% sell, 30% position_scale (conservative)
-    - bear_trending: 0.2% buy, -0.2% sell, 70% position_scale
-    - sideways_volatile: 0.2% buy, -0.2% sell, 50% position_scale, disabled
-    - sideways_calm: 0.2% buy, -0.2% sell, 100% position_scale (optimal)
-  - Implementation: `_execute_trade_logic()` uses regime config dynamically
-- [x] **Walk-Forward OOS Validation** (Completed 2026-01-23)
-  - Enhanced function: `_walk_forward_validation_enhanced()` in training.py
-  - TimeSeriesSplit-based validation (default 5 splits)
-  - Overfit detection: `OOS/IS Sharpe ratio < 0.3` or `IS > 5 with OOS < 1`
-  - Model confidence: 0.1-1.0 based on OOS Sharpe performance
-  - Per-fold metrics logging: IS vs OOS comparison
-  - Impact: Early detection of suspicious models (bear_trending 10.47 Sharpe)
-- [x] **Bull Regime Fallback Mechanism** (Completed 2026-01-19)
-  - Config: `fallback_to_regime: 'sideways_calm'` in REGIME_MODELS
-  - Implementation: `trading_strategy_sync.py::process_symbol()` fallback logic
-  - Rationale: Bull model (48.78% acc, -0.42 Sharpe) uses sideways_calm (53.08% acc, +5.99 Sharpe)
-  - Root cause: Feature-regime mismatch, NOT data insufficiency (11K samples like bear)
-- [x] **Data Collection Schedule Fix** (Completed 2026-01-19)
-  - `worker.py`: Changed `hour="9-15"` → `hour="9-16"` (capture 16:00 bar)
-  - `realtime_data.py`: Fixed time validation for 16:00 execution
-  - Impact: +6.25% data coverage (last trading hour 15:30-16:00)
-- [x] **CatBoost Training Error Fix** (Completed 2026-01-19)
-  - `ml/models.py`: Removed `logging_level='Silent'` (conflicted with `verbose=False`)
-  - Error: "Only one of parameters ['verbose', 'logging_level'] should be set"
-
-**Model Performance Analysis (Post-Enhancement 2026-01-19):**
-| Regime | Accuracy | Sharpe | Status |
-|--------|----------|--------|--------|
-| bull_trending | 48.78% | -0.42 | ✅ Fixed (uses sideways_calm fallback) |
-| bear_trending | 52.49% | 10.04 | ⚠️ Overfit suspected (OOS validation) |
-| sideways_calm | 53.08% | 5.99 | ✅ Good (primary model) |
-| sideways_volatile | N/A | N/A | ⚠️ Disabled (70 samples) |
-- Overall: Feature importance analysis enables data-driven model improvement
+### L.3 Backtesting Validation (Est: 3–4 days)
+- [ ] Dual-timeframe backtest engine
+- [ ] Compare: Daily-only vs Hybrid performance
+- [ ] Transaction cost sensitivity analysis
 
 ---
 
-## 🛡️ Phase I: Advanced Risk & Position Defense (Partial Complete 2026-01-04)
+## 📋 Phase M: Advanced ML (Long-term)
 
-**Goal**: Protect against overtrading, premature exits, and rapid re-trading.
+### M.1 Cross-Sectional Momentum (Est: 5–7 days)
+- [ ] Relative strength ranking across 50–100 symbols
+- [ ] Sector rotation signals
+- [ ] Top-N% stock selection
 
-### I.1 Trading Defense Mechanisms (Completed 2026-01-04)
-**Critical vulnerabilities fixed:**
-- ✅ **Minimum Holding Period**: 60 minutes (4 bars @ 15m)
-  - Prevents rapid position flipping (buy → sell within 15 min)
-  - Exception: Stop-loss signals override
-- ✅ **Minimum Profit Threshold**: 1.5% (5x transaction cost margin)
-  - Prevents premature exits on minimal profits
-  - Force exit allowed after 120 minutes
-- ✅ **Cooldown Period**: 60 minutes after exit
-  - Prevents immediate re-trading (whipsaw protection)
-  - Logged: "COOLDOWN: Xmin remaining"
+### M.2 SHAP Feature Selection (Est: 2–3 days)
+- [ ] Remove noisy features based on SHAP values
+- [ ] Regime-specific feature importance
 
-**Implementation:**
-- Database: `position_tracking` table (Alembic migration `002_position_tracking.py`)
-- RiskManager: `can_enter_position()`, `can_exit_position()`, `record_position_exit()`
-- Repository: `record_position_entry()`, `get_active_position()`, `update_position_exit()`
-- TradingStrategy: Defense checks before BUY/SELL orders
-
-**Impact:**
-- Transaction fee ratio: 0.5% → 0.1% (estimated)
-- Whipsaw trades: 20-30% → <5%
-- Expected ROI improvement: +10-15% annualized
-
-### I.2 Multi-Position System (Completed: 2026-01-05)
-**Features:**
-- ✅ **Concurrent Multi-Symbol Positions**
-  - Hold AAPL + MSFT + GOOGL + NVDA + TSLA simultaneously (max 5)
-  - Portfolio diversification based on correlation matrix
-  - Symbol selection: Low correlation (<0.7 with active positions)
-- ✅ **Modern Portfolio Theory (MPT)**
-  - Sharpe ratio maximization via scipy.optimize
-  - Constraint: Max 30% allocation per symbol, Sum of weights = 1.0
-  - Auto-upgrade: Backtest data → Live data (when 50+ trades exist)
-- ✅ **Kelly Criterion Position Sizing**
-  - Formula: `f* = (bp - q) / b` with 25% safety fraction
-  - Dynamic calculation per symbol based on win rate and P/L ratio
-  - Live data integration: Auto-switches after 10+ trades per symbol
-- ✅ **Portfolio-Level VaR**
-  - Daily Value-at-Risk calculation (95% confidence, 14-day window)
-  - Historical simulation method (percentile-based)
-  - Conservative fallback: -3% daily risk if data insufficient
-- ✅ **Daily Rebalancing**
-  - Schedule: 3:45 PM ET (15 min before market close)
-  - Trigger: Only if weight drift > 5%
-  - Minimum trade value: $100 (avoid micro-trades)
-- ✅ **Automated Parameter Updates**
-  - Daily 00:00 ET: Correlation matrix, VaR, Kelly sizes
-  - Rolling 14-day window (auto-refreshed)
-  - Redis caching: 24-hour TTL
-
-**Implementation:**
-- PortfolioOptimizer: Correlation, VaR, Kelly, MPT optimization
-- PortfolioRepository: P&L aggregation, trade history, position queries
-- PortfolioRebalancer: Weight calculation, drift detection, order execution
-- TradingStrategy.process_portfolio(): Multi-symbol batch processing
-- Celery tasks: update_portfolio_parameters (00:00), rebalance_portfolio (15:45)
-
-**Impact:**
-- Diversification: 1 → 5 concurrent positions
-- Risk reduction: Correlation-based selection (<0.7)
-- Capital efficiency: Kelly-optimized position sizing
-- Sharpe maximization: MPT weight optimization
-
-### I.3 External Data Integration (Completed via Phase F)
-**Already Implemented:**
-- Gemini API for news sentiment (Phase F.1)
-- Finnhub for financial news (Phase F.1)
-- yfinance for fundamentals (Phase F.2)
-
-**Out of Scope for Current Roadmap:**
-- Reddit/Twitter social sentiment
-- FRED economic indicators
-- Alternative data providers (Quandl, Bloomberg Terminal)
+### M.3 Adaptive Thresholds (Est: 3–4 days)
+- [ ] Optuna auto-tune CLASSIFICATION_THRESHOLD (θ) per regime
+- [ ] Dynamic confidence_threshold adjustment
 
 ---
 
-## Next Steps (Priority Order)
+## 📋 Phase N: Infrastructure & DevOps (Ongoing)
 
-### Immediate (This Week)
-1. **Circuit Breaker Enhancement** (Phase E.1)
-   - Portfolio-level loss limits
-   - API latency monitoring
-   - Consecutive loss detection
-   - Estimated: 2-3 days
-
-### Short-term (Next 2 Weeks)
-2. **Alerting System** (Phase E.1)
-   - Discord webhook integration
-   - Alert templates (trade, error, risk)
-   - Estimated: 1-2 days
-
-3. **Test Coverage Improvement**
-   - Target: 45% → 70%
-   - Focus: `features.py`, `predictor.py`, `portfolio_optimizer.py`
-   - Estimated: 3-4 days
-
-### Mid-term (Next Month)
-4. **PostgreSQL Replication** (Phase E.2)
-   - Primary-Replica setup for high availability
-   - Estimated: 5-7 days
-
-5. **Production Monitoring Dashboard**
-   - Grafana dashboard customization
-   - Key metrics: Sharpe, drawdown, win rate, latency
-   - Estimated: 2-3 days
-
-### Long-term (Future Phases)
-- Phase J: Microservices Architecture (if scaling needed)
-- Phase K: Machine Learning Model Registry (MLflow integration)
-- Phase L: Backtesting Platform (Web UI for strategy testing)
+| Task | Description | Priority |
+|------|-------------|----------|
+| N.1 MLflow | Model registry, versioning, A/B testing | Medium |
+| N.2 Grafana | Dashboard: Sharpe, drawdown, win rate, latency | Medium |
+| N.3 PostgreSQL HA | Primary-Replica replication | Low |
+| N.4 mypy strict | 80% → 100% type coverage | Low |
+| N.5 DB Indexes | Partial index optimization (VWAP, composite) | Low |
+| N.6 Dead Code | Remove unused legacy code, update Swagger | Low |
 
 ---
 
-## Technical Debt & Cleanup
+## 🔧 Technical Debt
 
-### Current Status
-- Test Coverage: ~45% (needs improvement to 70%+)
-- Documentation: Swagger partially updated (RAG endpoints documented)
-- Code Quality: Ruff linting passing, mypy type checking 80%
+| Area | Current | Target | Notes |
+|------|---------|--------|-------|
+| Test Coverage | ~58% (44 tests) | 70%+ (~65 tests) | Phase K.2 |
+| mypy | 80% | 100% strict | Phase N.4 |
+| Dead Code | `predict_next()` in predictor.py | Remove after L.2 | Legacy, preserved for backward compat |
+| DB Indexes | Basic | Partial indexes | Phase N.5 |
+| Swagger Docs | Partial | Full classification API | Phase N.6 |
+| strategies.py | Rule-based personas | Integrate in L.2 | Momentum/MeanReversion/Breakout |
 
-### Pending Tasks
-- [ ] **Remove Legacy Code**: Check for unused files (e.g., old `services/backtester.py`, mock strategies)
-- [ ] **Unit Tests**: Coverage improvement for `features.py` and `predictor.py`
-- [ ] **Documentation**: Update API docs (Swagger) with new Ops endpoints
-- [ ] **Type Hints**: Add missing type hints to achieve 100% mypy coverage
-- [ ] **English Logs**: Convert remaining Korean logs to English for international compatibility
+---
+
+## 📐 System Architecture (Current)
+
+```
+┌─────────────────────────────────────────────────────┐
+│                    FastAPI (main.py)                 │
+│  ┌─────────┐  ┌──────────┐  ┌────────────────────┐ │
+│  │ RAG API │  │ Trade API │  │ Portfolio API       │ │
+│  └────┬────┘  └────┬─────┘  └────────┬───────────┘ │
+│       │            │                  │             │
+│  ┌────▼────────────▼──────────────────▼───────────┐ │
+│  │         trading_strategy_sync.py                │ │
+│  │  predict_class() → (class, confidence, probs)   │ │
+│  └──────────┬──────────────────┬──────────────────┘ │
+│       ┌─────▼─────┐    ┌──────▼──────┐             │
+│       │ Predictor  │    │ RiskManager │             │
+│       │ (4 regime  │    │ (Kelly/MPT  │             │
+│       │ classifiers│    │  VaR/ATR)   │             │
+│       └─────┬─────┘    └─────────────┘             │
+│       ┌─────▼─────┐                                │
+│       │ ML Models  │ ensemble_classifier_{regime}.pkl│
+│       │ CatBoost   │ VotingClassifier(soft)         │
+│       │ LightGBM   │ 27 features, 3 classes         │
+│       │ XGBoost    │ θ=0.003                        │
+│       │ sector_id  │ Native categorical (not ordinal)│
+│       └───────────┘                                │
+├─────────────────────────────────────────────────────┤
+│  Celery Workers: daily_ohlcv, train_models,         │
+│  market_scan, trailing_stops, sentiment, rebalance  │
+├─────────────────────────────────────────────────────┤
+│  PostgreSQL/TimescaleDB │ Redis │ Alpaca API        │
+└─────────────────────────────────────────────────────┘
+```

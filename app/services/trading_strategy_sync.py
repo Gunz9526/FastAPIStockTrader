@@ -13,7 +13,7 @@ from app.repositories.portfolio_repo import PortfolioRepository
 from app.repositories.stock_repo_sync import SyncStockRepository
 from app.services.discord_notifier import discord_notifier
 from app.services.portfolio_optimizer import PortfolioOptimizer
-from app.services.regime import MarketRegime, RegimeDetector
+from app.services.regime import MarketRegime, RegimeDetector, REGIME_STRATEGY_WEIGHTS
 from app.services.risk_manager import RiskManager
 
 logger = logging.getLogger(__name__)
@@ -65,9 +65,13 @@ class SyncTradingStrategy:
         self.max_positions = 5  # Max 5 concurrent positions
         self.multi_position_mode = True  # Enable multi-position trading
 
-        self.sentiment_weight = 0.15  # Sentiment 영향도 15%
-        self.fundamentals_weight = 0.10  # Fundamentals 영향도 10%
-        self.ml_prediction_weight = 0.75  # ML 예측 영향도 75%
+        # Signal weights are now dynamic per regime (see REGIME_STRATEGY_WEIGHTS)
+        # Fallback weights used when regime is unknown
+        self._default_weights = {
+            'ml_prediction': 0.75,
+            'sentiment': 0.15,
+            'fundamentals': 0.10,
+        }
 
         # Alpaca API 초기화
         try:
@@ -110,10 +114,10 @@ class SyncTradingStrategy:
             end_date = pd.Timestamp.now(tz='UTC')
             start_date = end_date - pd.Timedelta(days=90)  # SMA50 + ADX를 위한 90일
 
-            spy_data = self.repo.get_ohlcv_range('SPY', start_date, end_date, timeframe='15m')
+            spy_data = self.repo.get_ohlcv_range('SPY', start_date, end_date, timeframe='1d')
 
-            if len(spy_data) < 100:
-                logger.warning("레짐 감지를 위한 SPY 데이터 부족")
+            if len(spy_data) < 50:
+                logger.warning("레짐 감지를 위한 SPY 일봉 데이터 부족")
                 return
 
             # Convert to DataFrame
@@ -149,10 +153,10 @@ class SyncTradingStrategy:
             regime = self.regime_detector.detect_regime(features_df, vix_value=vix_value)
             self.current_regime = regime
 
-            # Redis에 캐시 (5분 TTL - 15분봉이므로 충분)
+            # Redis에 캐시 (1시간 TTL - 일봉 기준 충분)
             try:
                 from app.core.cache import cache
-                cache.set("market:regime", regime.value, ttl_seconds=300)
+                cache.set("market:regime", regime.value, ttl_seconds=3600)
                 logger.info("시장 레짐 감지 및 캐시: %s", regime.value.upper())
             except Exception as cache_err:
                 logger.warning("Regime 캐시 실패: %s", cache_err)
@@ -171,16 +175,16 @@ class SyncTradingStrategy:
 
             # 1. Check if market is open (optional, skipped for now to allow pre-market scans)
 
-            # 2. Get recent 15-minute data (changed from daily)
+            # 2. Get recent daily OHLCV data
             end_date = pd.Timestamp.now(tz='UTC')
-            start_date = end_date - pd.Timedelta(days=30)  # ~30 days of 15m data = ~750 bars
+            start_date = end_date - pd.Timedelta(days=365)  # 1년 일봉 데이터
 
-            # Use 15-minute timeframe
-            ohlcv = self.repo.get_ohlcv_range(symbol, start_date, end_date, timeframe='15m')
+            # Use daily timeframe
+            ohlcv = self.repo.get_ohlcv_range(symbol, start_date, end_date, timeframe='1d')
 
-            # 최소 500개 바 필요 (약 5 거래일분 15분봉 데이터)
-            if len(ohlcv) < 500:
-                logger.debug("%s: 15분봉 데이터 부족 (%d bars, 500+ 필요)", symbol, len(ohlcv))
+            # 최소 50개 일봉 필요 (약 2.5개월 거래일)
+            if len(ohlcv) < 50:
+                logger.debug("%s: 일봉 데이터 부족 (%d bars, 50+ 필요)", symbol, len(ohlcv))
                 return
 
             # 3. DataFrame conversion with VWAP support
@@ -203,16 +207,12 @@ class SyncTradingStrategy:
                 return
 
             # 5. Predict (using regime-aware model if available)
-            # Use legacy feature set (25 features) for existing model compatibility
-            # After retraining, change to feature_set="core" (21 features, no Phase F)
+            # Determine effective prediction regime (handle fallback BEFORE scaling)
             current_features = features_df.iloc[[-1]]
-            scaled_features = self.feature_engineer.extract_feature_vector(
-                current_features, fit_scaler=False, feature_set="legacy"
-            )
+            regime_key = self.current_regime.value if self.current_regime else 'sideways_calm'
+            prediction_regime = self.current_regime
 
             # Check for regime fallback (e.g., bull_trending uses sideways_calm model)
-            prediction_regime = self.current_regime
-            regime_key = self.current_regime.value if self.current_regime else 'sideways_calm'
             config = self.regime_config.get(regime_key, {})
             fallback_regime = config.get('fallback_to_regime')
 
@@ -226,21 +226,39 @@ class SyncTradingStrategy:
                 except ValueError:
                     logger.warning("Invalid fallback regime: %s", fallback_regime)
 
-            # Predict next 15-minute return
-            prediction = self.predictor.predict_next(scaled_features, regime=prediction_regime)
+            # Scale using the MODEL's regime scaler (not current regime if fallback)
+            effective_regime = prediction_regime.value if prediction_regime else 'sideways_calm'
+            scaled_features = self.feature_engineer.extract_feature_vector(
+                current_features, fit_scaler=False, feature_set="base",
+                scaler_suffix=effective_regime
+            )
 
-            # 6. Execute Strategy (regime-adjusted)
-            self._execute_trade_logic(symbol, prediction, df.iloc[-1]['close'])
+            # Predict next daily class (UP/NEUTRAL/DOWN)
+            predicted_class, confidence, probabilities = self.predictor.predict_class(
+                scaled_features, regime=prediction_regime
+            )
+
+            # 6. Execute Strategy (regime-adjusted classification)
+            self._execute_trade_logic(
+                symbol, predicted_class, confidence, probabilities, df.iloc[-1]['close']
+            )
 
         except Exception as e:
             logger.error(f"{symbol} 처리 중 오류: {e}")
 
-    def _execute_trade_logic(self, symbol: str, prediction: float, current_price: float):
+    def _execute_trade_logic(
+        self,
+        symbol: str,
+        predicted_class: int,
+        confidence: float,
+        probabilities: dict[str, float],
+        current_price: float,
+    ):
         """
-        Execute trade based on prediction + sentiment + fundamentals.
-        Adaptive signal adjustment with auto-weighted factors.
+        Execute trade based on classification prediction + sentiment + fundamentals.
 
-        Phase H.4: Uses regime-specific thresholds from REGIME_TRADING_CONFIG.
+        Phase H.4: Uses regime-specific confidence_threshold from REGIME_TRADING_CONFIG.
+        Classification: 0=DOWN, 1=NEUTRAL, 2=UP.
         """
         # Phase H.4: Get regime-specific configuration
         regime_key = self.current_regime.value if self.current_regime else 'sideways_calm'
@@ -252,60 +270,64 @@ class SyncTradingStrategy:
             return
 
         # Get regime-specific thresholds
-        buy_threshold = config['buy_threshold']
-        sell_threshold = config['sell_threshold']
+        confidence_threshold = config['confidence_threshold']
         position_scale = config['position_scale']
-        confidence = config['confidence']
         min_profit_required = config.get('min_profit_required', 0.015)  # Default 1.5%
-        min_hold_multiplier = config.get('min_hold_multiplier', 1.0)  # Default 1x
+        min_hold_days = config.get('min_hold_days', 1)
 
         # sentiment와 fundamentals 가져오기
         sentiment_score, fundamentals = self._get_phase_f_signals(symbol)
 
-        # 가중치 기반 예측 조정
-        adjusted_prediction = self._calculate_adjusted_signal(
-            ml_prediction=prediction,
+        # 가중치 기반 신뢰도 조정
+        adjusted_confidence = self._calculate_adjusted_confidence(
+            predicted_class=predicted_class,
+            confidence=confidence,
+            probabilities=probabilities,
             sentiment_score=sentiment_score,
-            fundamentals=fundamentals
+            fundamentals=fundamentals,
         )
 
+        class_names = {0: "DOWN", 1: "NEUTRAL", 2: "UP"}
         logger.info(
-            "%s [15m][%s] ML예측: %.5f | 감성: %.2f | 조정: %.5f | 가격: %s | "
-            "임계값: BUY>%.3f, SELL<%.3f | 신뢰도: %.0f%% | 포지션스케일: %.0f%%",
-            symbol, regime_key, prediction, sentiment_score, adjusted_prediction,
-            current_price, buy_threshold, sell_threshold, confidence * 100, position_scale * 100
+            "%s [1d][%s] 예측: %s(%.1f%%) | 조정신뢰도: %.1f%% | 감성: %.2f | "
+            "가격: %s | 신뢰임계값: %.0f%% | 포지션스케일: %.0f%%",
+            symbol, regime_key, class_names.get(predicted_class, "?"),
+            confidence * 100, adjusted_confidence * 100,
+            sentiment_score, current_price,
+            confidence_threshold * 100, position_scale * 100,
         )
 
         if self.api is None:
             logger.warning("Alpaca API 미초기화 — 주문 생략")
             return
 
-        # 조정된 예측 사용 (레짐별 임계값 적용)
-        if adjusted_prediction > buy_threshold:
-            # BUY 신호
+        # Classification-based trading logic
+        if predicted_class == 2 and adjusted_confidence >= confidence_threshold:
+            # BUY 신호: UP class with sufficient confidence
             can_enter, reason = self.risk_manager.can_enter_position(symbol)
             if not can_enter:
                 logger.info("%s BUY 차단: %s", symbol, reason)
                 return
 
-            logger.info("%s BUY 허용: %s (신뢰도: %.0f%%)", symbol, reason, confidence * 100)
+            logger.info(
+                "%s BUY 허용: %s (신뢰도: %.1f%%)",
+                symbol, reason, adjusted_confidence * 100,
+            )
             self._place_order(symbol, "buy", "limit", current_price, position_scale)
 
-        elif adjusted_prediction < sell_threshold:
-            # SELL 신호
-            # 먼저 포지션 보유 여부 확인
+        elif predicted_class == 0 and adjusted_confidence >= confidence_threshold:
+            # SELL 신호: DOWN class with sufficient confidence
             if self._has_position(symbol):
                 active_position = self.repo.get_active_position(symbol)
                 if active_position:
-                    # Calculate current profit percentage
                     entry_price = active_position.entry_price
                     profit_pct = (current_price - entry_price) / entry_price
 
-                    # Phase H.4: Check regime-specific minimum profit before allowing sell
-                    if profit_pct < min_profit_required and profit_pct > -0.03:  # Allow stop-loss at -3%
+                    # Phase H.4: Check regime-specific minimum profit
+                    if profit_pct < min_profit_required and profit_pct > -0.03:
                         logger.info(
                             "%s SELL 차단: 최소수익 미달 (현재: %.2f%%, 필요: %.2f%%) [%s]",
-                            symbol, profit_pct * 100, min_profit_required * 100, regime_key
+                            symbol, profit_pct * 100, min_profit_required * 100, regime_key,
                         )
                         return
 
@@ -315,14 +337,17 @@ class SyncTradingStrategy:
                         entry_price=entry_price,
                         current_price=current_price,
                         entry_time=active_position.entry_time,
-                        hold_multiplier=min_hold_multiplier  # Pass regime-specific multiplier
+                        hold_multiplier=float(min_hold_days),
                     )
 
                     if not can_exit:
                         logger.info("%s SELL 차단: %s", symbol, reason)
                         return
 
-                    logger.info("%s SELL 허용: %s (수익: %.2f%%)", symbol, reason, profit_pct * 100)
+                    logger.info(
+                        "%s SELL 허용: %s (수익: %.2f%%)",
+                        symbol, reason, profit_pct * 100,
+                    )
 
                 self._place_order(symbol, "sell", "market", current_price)
             else:
@@ -363,40 +388,101 @@ class SyncTradingStrategy:
 
         return sentiment_score, fundamentals
 
-    def _calculate_adjusted_signal(self, ml_prediction: float, sentiment_score: float, fundamentals: dict) -> float:
+    def _calculate_adjusted_confidence(
+        self,
+        predicted_class: int,
+        confidence: float,
+        probabilities: dict[str, float],
+        sentiment_score: float,
+        fundamentals: dict,
+    ) -> float:
         """
-        Calculate adjusted trading signal with adaptive weights.
-        
-        Formula:
-            Adjusted = (ML * 0.75) + (Sentiment * 0.15) + (Fundamentals * 0.10)
-        
+        Calculate adjusted confidence for classification-based trading.
+
+        Adjusts the raw prediction confidence using sentiment and fundamentals
+        signals, weighted by regime-specific REGIME_STRATEGY_WEIGHTS.
+
+        For BUY (class=2/UP):
+            - Positive sentiment → boost confidence
+            - Undervalued fundamentals → boost confidence
+        For SELL (class=0/DOWN):
+            - Negative sentiment → boost confidence
+            - Overvalued fundamentals → boost confidence
+        For NEUTRAL (class=1):
+            - No adjustment (stay neutral)
+
         Args:
-            ml_prediction: Model prediction (-0.05 to +0.05 range)
+            predicted_class: 0=DOWN, 1=NEUTRAL, 2=UP
+            confidence: Raw model confidence (0.0 - 1.0)
+            probabilities: Class probability dict {"DOWN": p, "NEUTRAL": p, "UP": p}
             sentiment_score: Sentiment score (-1.0 to +1.0)
-            fundamentals: Fundamentals dict with PE, PB ratios
-        
+            fundamentals: Fundamentals dict with pe_ratio, pb_ratio, overvalued keys
+
         Returns:
-            Adjusted prediction value
+            Adjusted confidence value (0.0 - 1.0)
         """
-        # Sentiment adjustment: -1.0 (극도 부정) to +1.0 (극도 긍정)
-        # Scale to same magnitude as ML prediction
-        sentiment_adjustment = sentiment_score * 0.005  # Max ±0.005
+        # Resolve regime-specific weights
+        regime_key = (
+            self.current_regime.value
+            if isinstance(self.current_regime, MarketRegime)
+            else str(self.current_regime)
+        )
+        weights = REGIME_STRATEGY_WEIGHTS.get(regime_key, self._default_weights)
 
-        # Fundamentals adjustment: Overvalued penalty
-        fundamentals_adjustment = 0.0
-        if fundamentals['overvalued']:
-            fundamentals_adjustment = -0.003  # Penalty for overvalued stocks
-        elif fundamentals['pe_ratio'] < 10:  # Undervalued
-            fundamentals_adjustment = 0.002  # Bonus for undervalued stocks
+        ml_weight: float = weights['ml_prediction']
+        sentiment_weight: float = weights['sentiment']
+        fundamentals_weight: float = weights['fundamentals']
 
-        # Weighted combination
-        adjusted = (
-            ml_prediction * self.ml_prediction_weight +
-            sentiment_adjustment * self.sentiment_weight +
-            fundamentals_adjustment * self.fundamentals_weight
+        logger.debug(
+            "Confidence weights [regime=%s]: ML=%.2f, Sentiment=%.2f, Fundamentals=%.2f",
+            regime_key, ml_weight, sentiment_weight, fundamentals_weight,
         )
 
-        return adjusted
+        # --- 1. ML confidence (base) ---
+        ml_component: float = confidence
+
+        # --- 2. Sentiment adjustment (-1.0 to +1.0) → confidence modifier ---
+        # For UP prediction: positive sentiment boosts, negative dampens
+        # For DOWN prediction: negative sentiment boosts, positive dampens
+        if predicted_class == 2:  # UP
+            sentiment_modifier = sentiment_score * 0.1  # ±10% max adjustment
+        elif predicted_class == 0:  # DOWN
+            sentiment_modifier = -sentiment_score * 0.1  # Reversed
+        else:  # NEUTRAL
+            sentiment_modifier = 0.0
+
+        sentiment_component: float = max(0.0, min(1.0, 0.5 + sentiment_modifier))
+
+        # --- 3. Fundamentals adjustment ---
+        pe_ratio: float = fundamentals.get('pe_ratio', 15.0)
+        if predicted_class == 2:  # UP — penalize overvalued, boost undervalued
+            if pe_ratio > 40:
+                fund_modifier = -0.1 * min((pe_ratio - 15) / 50, 1.0)
+            elif pe_ratio < 10:
+                fund_modifier = 0.1 * min((15 - pe_ratio) / 15, 1.0)
+            else:
+                fund_modifier = 0.05 * (15 - pe_ratio) / 15
+        elif predicted_class == 0:  # DOWN — boost overvalued, penalize undervalued
+            if pe_ratio > 40:
+                fund_modifier = 0.1 * min((pe_ratio - 15) / 50, 1.0)
+            elif pe_ratio < 10:
+                fund_modifier = -0.1 * min((15 - pe_ratio) / 15, 1.0)
+            else:
+                fund_modifier = -0.05 * (15 - pe_ratio) / 15
+        else:
+            fund_modifier = 0.0
+
+        fundamentals_component: float = max(0.0, min(1.0, 0.5 + fund_modifier))
+
+        # --- 4. Weighted combination ---
+        adjusted: float = (
+            ml_component * ml_weight
+            + sentiment_component * sentiment_weight
+            + fundamentals_component * fundamentals_weight
+        )
+
+        # Clamp to [0, 1]
+        return max(0.0, min(1.0, adjusted))
 
     def _has_position(self, symbol: str) -> bool:
         """Check if position exists for symbol."""
@@ -445,16 +531,61 @@ class SyncTradingStrategy:
             realized_pnl = 0.0
 
             try:
-                # Phase H.4: Apply position scale (minimum 1 share)
-                base_qty = 1
-                qty = max(1, int(base_qty * position_scale))
-
                 if side == "buy":
-                    # 매수 가능 금액 확인
+                    # Dynamic position sizing using RiskManager (ATR-based + portfolio risk)
                     account = self.api.get_account()
-                    if float(account.buying_power) < price * qty:
+                    buying_power = float(account.buying_power)
+                    portfolio_value = float(account.portfolio_value)
+
+                    # Get ATR from latest features for volatility-based sizing
+                    atr = None
+                    try:
+                        end_date = pd.Timestamp.now(tz='UTC')
+                        start_date = end_date - pd.Timedelta(days=30)
+                        ohlcv = self.repo.get_ohlcv_range(symbol, start_date, end_date, timeframe='1d')
+                        if len(ohlcv) >= 14:
+                            df_temp = pd.DataFrame([{
+                                'high': bar.high, 'low': bar.low, 'close': bar.close
+                            } for bar in ohlcv])
+                            import talib
+                            atr_values = talib.ATR(
+                                df_temp['high'].values,
+                                df_temp['low'].values,
+                                df_temp['close'].values,
+                                timeperiod=14
+                            )
+                            atr = float(atr_values[-1]) if not pd.isna(atr_values[-1]) else None
+                    except Exception as e:
+                        logger.debug("%s ATR 계산 실패: %s", symbol, e)
+
+                    allowed, qty = self.risk_manager.calculate_position_size(
+                        symbol=symbol,
+                        price=price,
+                        buying_power=buying_power,
+                        atr=atr,
+                        portfolio_value=portfolio_value
+                    )
+
+                    if not allowed or qty < 1:
+                        logger.warning("%s 포지션 사이징 실패 (qty=%d)", symbol, qty)
+                        return
+
+                    # Apply regime position scale (0.0-1.0)
+                    qty = max(1, int(qty * position_scale))
+
+                    # Final buying power check
+                    if buying_power < price * qty:
                         logger.warning("%s 매수 가능 금액 부족", symbol)
                         return
+
+                    logger.info(
+                        "%s 포지션 사이즈: %d주 @ $%.2f (ATR=%.2f, 스케일=%.0f%%)",
+                        symbol, qty, price, atr or 0.0, position_scale * 100
+                    )
+                else:
+                    # For SELL: use existing position quantity
+                    active_pos = self.repo.get_active_position(symbol)
+                    qty = active_pos.quantity if active_pos else 1
 
                 # Create order request object
                 order_side = OrderSide.BUY if side == "buy" else OrderSide.SELL
@@ -513,9 +644,18 @@ class SyncTradingStrategy:
                     if active_position:
                         # 손익 계산
                         realized_pnl = (price - active_position.entry_price) * active_position.quantity
-                        self.repo.update_position_exit(active_position.id, price)
-                        self.risk_manager.record_position_exit(symbol)
-                        self.db.commit()
+                        try:
+                            self.repo.update_position_exit(active_position.id, price)
+                            self.risk_manager.record_position_exit(symbol)
+                            self.db.commit()
+                        except Exception as db_err:
+                            logger.critical(
+                                "CRITICAL: Alpaca SELL 주문 성공했으나 DB 업데이트 실패! "
+                                "수동 조정 필요: %s SELL (order_id=%s, position_id=%s, error=%s)",
+                                symbol, str(order.id), str(active_position.id), str(db_err)
+                            )
+                            self.db.rollback()
+                            raise
 
             except Exception as e:
                 logger.error("%s 주문 실패: %s", symbol, str(e), exc_info=True)
@@ -599,16 +739,16 @@ class SyncTradingStrategy:
             )
 
             # 5. Analyze each symbol
-            signals = {}  # {symbol: {'signal': float, 'kelly': float, 'price': float}}
+            signals = {}  # {symbol: {'class': int, 'confidence': float, 'probs': dict, 'kelly': float, 'price': float}}
 
             for symbol in symbols:
                 try:
                     # Get prediction signal
                     end_date = pd.Timestamp.now(tz='UTC')
-                    start_date = end_date - pd.Timedelta(days=30)
+                    start_date = end_date - pd.Timedelta(days=365)
 
-                    ohlcv = self.repo.get_ohlcv_range(symbol, start_date, end_date, timeframe='15m')
-                    if len(ohlcv) < 500:
+                    ohlcv = self.repo.get_ohlcv_range(symbol, start_date, end_date, timeframe='1d')
+                    if len(ohlcv) < 50:
                         continue
 
                     df = pd.DataFrame([{
@@ -627,12 +767,17 @@ class SyncTradingStrategy:
                         continue
 
                     latest_features = features_df.iloc[[-1]]
+                    # Use base feature set (27 features with momentum) matching training pipeline
+                    regime_suffix = self.current_regime.value if self.current_regime else 'sideways_calm'
                     X_norm = self.feature_engineer.extract_feature_vector(
-                        latest_features, feature_set="legacy"
+                        latest_features, feature_set="base",
+                        scaler_suffix=regime_suffix
                     )
 
-                    # Get prediction with regime awareness
-                    prediction = self.predictor.predict_next(X_norm, regime=self.current_regime)
+                    # Get classification prediction with regime awareness
+                    pred_class, pred_conf, pred_probs = self.predictor.predict_class(
+                        X_norm, regime=self.current_regime
+                    )
 
                     # Calculate Kelly position size
                     kelly_size = self.optimizer.kelly_criterion(
@@ -642,14 +787,21 @@ class SyncTradingStrategy:
                     )
 
                     current_price = df['close'].iloc[-1]
+                    class_names = {0: "DOWN", 1: "NEUTRAL", 2: "UP"}
 
                     signals[symbol] = {
-                        'signal': prediction,
+                        'class': pred_class,
+                        'confidence': pred_conf,
+                        'probs': pred_probs,
                         'kelly': kelly_size,
-                        'price': current_price
+                        'price': current_price,
                     }
 
-                    logger.info("  %s: 신호=%.5f, Kelly=%.2f%%, 가격=$%.2f", symbol, prediction, kelly_size * 100, current_price)
+                    logger.info(
+                        "  %s: 예측=%s(%.1f%%), Kelly=%.2f%%, 가격=$%.2f",
+                        symbol, class_names.get(pred_class, "?"),
+                        pred_conf * 100, kelly_size * 100, current_price,
+                    )
 
                 except (ValueError, KeyError, AttributeError) as e:
                     logger.error("%s 분석 실패: %s", symbol, str(e))
@@ -692,7 +844,7 @@ class SyncTradingStrategy:
         Select symbols with low correlation to existing positions.
         
         Strategy:
-        - Prioritize symbols with strong BUY signals (signal > 0.005)
+        - Prioritize symbols with UP class prediction and high confidence
         - Avoid symbols highly correlated with active positions (corr > 0.7)
         - Limit to max_new_positions
         """
@@ -702,7 +854,8 @@ class SyncTradingStrategy:
             if symbol in active_symbols:
                 continue
 
-            if data['signal'] <= 0.005:  # Weak signal
+            # Only consider UP predictions with reasonable confidence
+            if data.get('class') != 2 or data.get('confidence', 0) < 0.35:
                 continue
 
             # Check correlation with active positions
@@ -714,13 +867,13 @@ class SyncTradingStrategy:
 
             candidates.append({
                 'symbol': symbol,
-                'signal': data['signal'],
+                'confidence': data.get('confidence', 0),
                 'max_corr': max_corr,
                 'kelly': data['kelly']
             })
 
-        # Sort by signal strength (descending)
-        candidates.sort(key=lambda x: x['signal'], reverse=True)
+        # Sort by confidence (descending)
+        candidates.sort(key=lambda x: x['confidence'], reverse=True)
 
         # Filter by correlation threshold and select top N
         selected = []
@@ -733,49 +886,60 @@ class SyncTradingStrategy:
         return selected
 
     def _process_buy_signal(self, symbol: str, signal_data: dict, portfolio_value: float):
-        """Process BUY signal with Kelly position sizing."""
-        try:
-            # 쿨다운 확인
-            can_enter, reason = self.risk_manager.can_enter_position(symbol)
-            if not can_enter:
-                logger.info("%s BUY 차단: %s", symbol, reason)
+        """Process BUY signal with Kelly position sizing.
+
+        Concurrency Control:
+            - Redis distributed lock prevents duplicate BUY orders from parallel Celery workers
+        """
+        from app.core.distributed_lock import get_trading_lock
+
+        with get_trading_lock(symbol, ttl_seconds=30) as lock:
+            if not lock.acquired:
+                logger.warning("%s BUY 락 획득 실패 - 건너뛰기", symbol)
                 return
 
-            # Kelly 기반 포지션 크기 계산
-            kelly_fraction = signal_data['kelly']
-            position_value = portfolio_value * kelly_fraction
-            current_price = signal_data['price']
-            qty = int(position_value / current_price)
+            try:
+                # 쿨다운 확인
+                can_enter, reason = self.risk_manager.can_enter_position(symbol)
+                if not can_enter:
+                    logger.info("%s BUY 차단: %s", symbol, reason)
+                    return
 
-            if qty < 1:
-                logger.info("%s BUY 건너뛰기: Kelly 크기 너무 작음 (%.2f%%)", symbol, kelly_fraction * 100)
-                return
+                # Kelly 기반 포지션 크기 계산
+                kelly_fraction = signal_data['kelly']
+                position_value = portfolio_value * kelly_fraction
+                current_price = signal_data['price']
+                qty = int(position_value / current_price)
 
-            logger.info("%s BUY: %d주 @ $%.2f (Kelly: %.2f%%)", symbol, qty, current_price, kelly_fraction * 100)
+                if qty < 1:
+                    logger.info("%s BUY 건너뛰기: Kelly 크기 너무 작음 (%.2f%%)", symbol, kelly_fraction * 100)
+                    return
 
-            # alpaca-py로 주문
-            order_data = MarketOrderRequest(
-                symbol=symbol,
-                qty=qty,
-                side=OrderSide.BUY,
-                time_in_force=TimeInForce.DAY
-            )
-            order = self.api.submit_order(order_data=order_data)
+                logger.info("%s BUY: %d주 @ $%.2f (Kelly: %.2f%%)", symbol, qty, current_price, kelly_fraction * 100)
 
-            logger.info("주문 실행: BUY %s (ID: %s)", symbol, order.id)
+                # alpaca-py로 주문
+                order_data = MarketOrderRequest(
+                    symbol=symbol,
+                    qty=qty,
+                    side=OrderSide.BUY,
+                    time_in_force=TimeInForce.DAY
+                )
+                order = self.api.submit_order(order_data=order_data)
 
-            # DB에 기록
-            entry_time = datetime.now(UTC)  # timezone-aware
-            regime_str = self.current_regime.value if self.current_regime else None
-            self.repo.record_position_entry(symbol, current_price, qty, entry_time, regime=regime_str)
-            self.risk_manager.record_position_entry(symbol, entry_time)
-            self.session.commit()
+                logger.info("주문 실행: BUY %s (ID: %s)", symbol, order.id)
 
-        except (ValueError, AttributeError, TypeError) as e:
-            logger.error("%s BUY 주문 실패: %s", symbol, str(e))
+                # DB에 기록
+                entry_time = datetime.now(UTC)  # timezone-aware
+                regime_str = self.current_regime.value if self.current_regime else None
+                self.repo.record_position_entry(symbol, current_price, qty, entry_time, regime=regime_str)
+                self.risk_manager.record_position_entry(symbol, entry_time)
+                self.session.commit()
+
+            except (ValueError, AttributeError, TypeError) as e:
+                logger.error("%s BUY 주문 실패: %s", symbol, str(e))
 
     def _process_sell_signal(self, symbol: str, signal_data: dict):
-        """Process SELL signal with regime-aware defense checks."""
+        """Process SELL signal with regime-aware defense checks (classification-based)."""
         try:
             # 활성 포지션 가져오기
             active_position = self.repo.get_active_position(symbol)
@@ -784,6 +948,8 @@ class SyncTradingStrategy:
 
             current_price = signal_data['price']
             entry_price = active_position.entry_price
+            pred_class = signal_data.get('class', 1)  # default NEUTRAL
+            pred_conf = signal_data.get('confidence', 0.0)
 
             # 손익 계산
             pnl_pct = (current_price - entry_price) / entry_price
@@ -802,10 +968,10 @@ class SyncTradingStrategy:
                 force_exit = True
                 force_reason = f"STOP_LOSS: {pnl_pct:.2%} <= -3.0%"
 
-            # 1-3. 강한 매도 신호 (-0.01 이하 = -1% 예상 하락)
-            elif signal_data['signal'] <= -0.01:
+            # 1-3. 강한 DOWN 신호 (class=0 + 높은 신뢰도 >= 0.6)
+            elif pred_class == 0 and pred_conf >= 0.6:
                 force_exit = True
-                force_reason = f"STRONG_SELL: signal={signal_data['signal']:.4f}"
+                force_reason = f"STRONG_SELL: class=DOWN, confidence={pred_conf:.2f}"
 
             # 1-4. SIDEWAYS_VOLATILE에서 빠른 익절 (변동성 높으므로)
             elif self.current_regime == MarketRegime.SIDEWAYS_VOLATILE and pnl_pct >= 0.02:
@@ -825,18 +991,22 @@ class SyncTradingStrategy:
                 entry_time=active_position.entry_time
             )
 
-            # 2-1. 명확한 매도 신호 확인 (신호 < -0.005 = -0.5% 예상 하락)
-            has_sell_signal = signal_data['signal'] < -0.005
+            # 2-1. 명확한 매도 신호 확인 (DOWN class + confidence >= 0.45)
+            has_sell_signal = pred_class == 0 and pred_conf >= 0.45
 
             if not can_exit and not has_sell_signal:
                 # 방어 차단 + 약한 신호 → SELL 차단
-                logger.info("%s SELL 차단: %s (신호: %.4f)", symbol, defense_reason, signal_data['signal'])
+                logger.info(
+                    "%s SELL 차단: %s (class=%d, conf=%.2f)",
+                    symbol, defense_reason, pred_class, pred_conf,
+                )
                 return
 
             # 2-2. 방어 허용 또는 명확한 신호 → SELL 실행
-            sell_reason = f"DEFENSE_OK: {defense_reason}" if can_exit else f"STRONG_SIGNAL: {signal_data['signal']:.4f}"
-            # Calculate PnL percentage
-            entry_price = active_position.entry_price
+            if can_exit:
+                sell_reason = f"DEFENSE_OK: {defense_reason}"
+            else:
+                sell_reason = f"STRONG_DOWN: conf={pred_conf:.2f}"
             pnl_pct = ((current_price - entry_price) / entry_price) if entry_price else 0.0
             logger.info("%s SELL 허용: %s (손익: %.2f%%)", symbol, sell_reason, pnl_pct * 100)
             self._execute_sell_order(symbol, active_position, current_price, sell_reason)
@@ -845,25 +1015,52 @@ class SyncTradingStrategy:
             logger.error("%s SELL 주문 실패: %s", symbol, str(e))
 
     def _execute_sell_order(self, symbol: str, position, current_price: float, reason: str):
-        """Execute SELL order (extracted for reuse)."""
-        try:
-            qty = position.quantity
-            order_data = MarketOrderRequest(
-                symbol=symbol,
-                qty=qty,
-                side=OrderSide.SELL,
-                time_in_force=TimeInForce.DAY
-            )
-            order = self.api.submit_order(order_data=order_data)
+        """Execute SELL order (extracted for reuse).
 
-            logger.info("주문 실행: SELL %s x%d @ $%.2f (ID: %s, 이유: %s)",
-                       symbol, qty, current_price, order.id, reason)
+        Concurrency Control:
+            - Redis distributed lock prevents duplicate SELL orders from parallel Celery workers
+            - Re-reads position with FOR UPDATE to ensure consistency
+        """
+        from app.core.distributed_lock import get_trading_lock
 
-            # DB 업데이트
-            self.repo.update_position_exit(position.id, current_price)
-            self.risk_manager.record_position_exit(symbol)
-            self.session.commit()
+        with get_trading_lock(symbol, ttl_seconds=30) as lock:
+            if not lock.acquired:
+                logger.warning("%s SELL 락 획득 실패 - 건너뛰기", symbol)
+                return
 
-        except Exception as e:
-            logger.error("%s SELL 주문 실행 실패: %s", symbol, str(e))
-            raise
+            try:
+                # Re-read position with FOR UPDATE to prevent dirty reads
+                locked_pos = self.repo.get_active_position_for_update(symbol)
+                if locked_pos is None:
+                    logger.warning("%s: 포지션 이미 닫힘 - SELL 건너뛰기", symbol)
+                    return
+
+                qty = locked_pos.quantity
+                order_data = MarketOrderRequest(
+                    symbol=symbol,
+                    qty=qty,
+                    side=OrderSide.SELL,
+                    time_in_force=TimeInForce.DAY
+                )
+                order = self.api.submit_order(order_data=order_data)
+
+                logger.info("주문 실행: SELL %s x%d @ $%.2f (ID: %s, 이유: %s)",
+                           symbol, qty, current_price, order.id, reason)
+
+                # DB 업데이트
+                try:
+                    self.repo.update_position_exit(locked_pos.id, current_price)
+                    self.risk_manager.record_position_exit(symbol)
+                    self.session.commit()
+                except Exception as db_err:
+                    logger.critical(
+                        "CRITICAL: Alpaca SELL 주문 성공했으나 DB 업데이트 실패! "
+                        "수동 조정 필요: %s SELL %d주 @ $%.2f (order_id=%s, position_id=%s, error=%s)",
+                        symbol, qty, current_price, str(order.id), str(locked_pos.id), str(db_err)
+                    )
+                    self.session.rollback()
+                    raise
+
+            except Exception as e:
+                logger.error("%s SELL 주문 실행 실패: %s", symbol, str(e))
+                raise

@@ -1,141 +1,257 @@
 import logging
+from typing import Optional
 
 import backtrader as bt
 import pandas as pd
 
 from app.ml.features import FeatureEngineer
+from app.ml.models import CLASS_NAMES
 from app.ml.predictor import PredictorService
+from app.services.regime import MarketRegime, RegimeDetector
 
 logger = logging.getLogger(__name__)
 
+# Regime-specific classification config (mirrors core/config.py REGIME_TRADING_CONFIG).
+# Local copy avoids circular import at module level.
+BACKTEST_REGIME_CONFIG: dict[str, dict] = {
+    "bull_trending": {
+        "confidence_threshold": 0.45,
+        "min_hold_days": 2,
+        "position_scale": 0.5,
+    },
+    "bear_trending": {
+        "confidence_threshold": 0.55,
+        "min_hold_days": 1,
+        "position_scale": 0.5,
+    },
+    "sideways_volatile": {
+        "confidence_threshold": 0.60,
+        "min_hold_days": 1,
+        "position_scale": 0.3,
+    },
+    "sideways_calm": {
+        "confidence_threshold": 0.40,
+        "min_hold_days": 2,
+        "position_scale": 1.0,
+    },
+}
+
+_DEFAULT_REGIME_CONFIG: dict = {
+    "confidence_threshold": 0.50,
+    "min_hold_days": 1,
+    "position_scale": 1.0,
+}
+
+
 class MLStrategy(bt.Strategy):
+    """Backtrader Strategy using ternary classification (DOWN/NEUTRAL/UP).
+
+    Uses ``PredictorService.predict_class()`` which returns
+    ``(predicted_class, confidence, probabilities)``.
+
+    Signal logic:
+        * **BUY** — ``predicted_class == 2`` (UP) *and*
+          ``confidence >= confidence_threshold``
+        * **SELL** — ``predicted_class == 0`` (DOWN) *and*
+          ``confidence >= confidence_threshold``
+        * Minimum hold-days guard prevents premature exit.
+
+    Position sizing is ATR-based (2× ATR stop, 2 % risk-per-trade) with a
+    regime-dependent ``position_scale`` multiplier.
     """
-    Backtrader Strategy using PredictorService for signals.
-    """
+
     params = (
-        ('threshold', 0.005),  # Buy/Sell threshold (0.5%)
-        ('risk_per_trade', 0.1), # Invest 10% of cash per trade (simple sizing)
+        ("risk_per_trade", 0.10),  # Fallback fraction of cash per trade
+        ("regime_aware", True),     # Use regime-specific thresholds & model
     )
 
-    def __init__(self):
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    def __init__(self) -> None:
         self.predictor = PredictorService()
         self.feature_engineer = FeatureEngineer()
+        self.regime_detector = RegimeDetector()
         self.dataclose = self.datas[0].close
-        self.order = None
-        self.buyprice = None
-        self.buycomm = None
+        self.order: Optional[bt.Order] = None
+        self.buyprice: Optional[float] = None
+        self.buycomm: Optional[float] = None
 
-        # To keep track of prediction history
-        self.predictions = []
+        # Classification history: list of (class, confidence, probabilities)
+        self.predictions: list[tuple[int, float, dict[str, float]]] = []
 
-    def log(self, txt, dt=None):
-        """Logging function for this strategy"""
+        # Minimum-hold tracking (bar index of entry)
+        self.entry_bar: int = 0
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def log(self, txt: str, dt=None) -> None:
+        """Write a timestamped log line."""
         dt = dt or self.datas[0].datetime.date(0)
-        logger.info(f'{dt.isoformat()}, {txt}')
+        logger.info("%s, %s", dt.isoformat(), txt)
 
-    def notify_order(self, order):
+    # ------------------------------------------------------------------
+    # Notifications
+    # ------------------------------------------------------------------
+
+    def notify_order(self, order: bt.Order) -> None:
         if order.status in [order.Submitted, order.Accepted]:
-            # Buy/Sell order submitted/accepted to/by broker - Nothing to do
             return
 
         if order.status in [order.Completed]:
             if order.isbuy():
                 self.log(
-                    f'BUY EXECUTED, Price: {order.executed.price:.2f}, Cost: {order.executed.value:.2f}, Comm: {order.executed.comm:.2f}'
+                    f"BUY EXECUTED, Price: {order.executed.price:.2f}, "
+                    f"Cost: {order.executed.value:.2f}, "
+                    f"Comm: {order.executed.comm:.2f}"
                 )
                 self.buyprice = order.executed.price
                 self.buycomm = order.executed.comm
-            else:  # Sell
+                self.entry_bar = len(self)
+            else:
                 self.log(
-                    f'SELL EXECUTED, Price: {order.executed.price:.2f}, Cost: {order.executed.value:.2f}, Comm: {order.executed.comm:.2f}'
+                    f"SELL EXECUTED, Price: {order.executed.price:.2f}, "
+                    f"Cost: {order.executed.value:.2f}, "
+                    f"Comm: {order.executed.comm:.2f}"
                 )
 
             self.bar_executed = len(self)
 
         elif order.status in [order.Canceled, order.Margin, order.Rejected]:
-            self.log('Order Canceled/Margin/Rejected')
+            self.log("Order Canceled/Margin/Rejected")
 
         self.order = None
 
-    def notify_trade(self, trade):
+    def notify_trade(self, trade: bt.Trade) -> None:
         if not trade.isclosed:
             return
+        self.log(f"OPERATION PROFIT, GROSS {trade.pnl:.2f}, NET {trade.pnlcomm:.2f}")
 
-        self.log(f'OPERATION PROFIT, GROSS {trade.pnl:.2f}, NET {trade.pnlcomm:.2f}')
+    # ------------------------------------------------------------------
+    # Core logic
+    # ------------------------------------------------------------------
 
-    def next(self):
-        # Simply log the closing price of the series from the reference
-        # self.log(f'Close, {self.dataclose[0]:.2f}')
-
+    def next(self) -> None:  # noqa: C901 — kept as single method for Backtrader compat
+        """Generate signals using ternary classification (DOWN/NEUTRAL/UP)."""
         if self.order:
             return
 
-        # 1. Prepare Data for Prediction (Need history for features)
-        # Backtrader feeds data bar by bar. We need to construct a DataFrame window.
-        # This is tricky in Backtrader. We'll use a hack or assume we can access full history.
-        # Better approach: We pre-calculate predictions before backtest?
-        # No, to simulate reality, we should calculate on the fly (or use pre-calc aligned by date).
-
-        # Simpler approach for verification:
-        # Pre-calculated predictions passed as a separate data feed or csv is more efficient,
-        # but let's try to simulate 'PredictorService' usage.
-
         try:
-            # Construct DataFrame from recent history (e.g. last 100 bars)
-            # Accessing internal deque of Backtrader
-            # Note: This is slow. For production backtest, optimize this.
-            lookback = 60 # Enough for some indicators
-            if len(self) < lookback:
+            self._process_bar()
+        except Exception as exc:
+            logger.error("Strategy error on bar %d: %s", len(self), exc)
+
+    def _process_bar(self) -> None:
+        """Internal: build features, predict, and act."""
+        lookback = 60
+        if len(self) < lookback:
+            return
+
+        # ----- 1. Build DataFrame from Backtrader buffers -----
+        data_window = {
+            "open": list(self.datas[0].open.get(ago=0, size=lookback)),
+            "high": list(self.datas[0].high.get(ago=0, size=lookback)),
+            "low": list(self.datas[0].low.get(ago=0, size=lookback)),
+            "close": list(self.datas[0].close.get(ago=0, size=lookback)),
+            "volume": list(self.datas[0].volume.get(ago=0, size=lookback)),
+        }
+        dates = [
+            bt.num2date(d)
+            for d in self.datas[0].datetime.get(ago=0, size=lookback)
+        ]
+
+        df = pd.DataFrame(data_window)
+        df["date_time"] = dates
+        df.set_index("date_time", inplace=True)
+
+        # ----- 2. Feature engineering -----
+        features_df = self.feature_engineer.create_features(df)
+        if features_df.empty:
+            return
+
+        # ----- 3. Regime detection -----
+        if self.params.regime_aware:
+            detected_regime = self.regime_detector.detect_regime(features_df)
+            regime_key = detected_regime.value
+            regime_cfg = BACKTEST_REGIME_CONFIG.get(regime_key, _DEFAULT_REGIME_CONFIG)
+        else:
+            detected_regime = MarketRegime.SIDEWAYS_CALM
+            regime_cfg = _DEFAULT_REGIME_CONFIG
+
+        confidence_threshold: float = regime_cfg["confidence_threshold"]
+        min_hold_days: int = regime_cfg["min_hold_days"]
+        position_scale: float = regime_cfg["position_scale"]
+
+        # ----- 4. Extract scaled features (base set) -----
+        current_features = features_df.iloc[[-1]]
+        regime_suffix = detected_regime.value if detected_regime else 'sideways_calm'
+        scaled_features = self.feature_engineer.extract_feature_vector(
+            current_features, fit_scaler=False, feature_set="base",
+            scaler_suffix=regime_suffix
+        )
+
+        # ----- 5. Classification prediction -----
+        predicted_class, confidence, probabilities = self.predictor.predict_class(
+            scaled_features, regime=detected_regime
+        )
+        self.predictions.append((predicted_class, confidence, probabilities))
+        class_name = CLASS_NAMES[predicted_class]
+
+        # ----- 6. Trading logic -----
+        if not self.position:
+            # --- BUY: predicted UP with sufficient confidence ---
+            if predicted_class == 2 and confidence >= confidence_threshold:
+                size = self._calc_position_size(features_df, position_scale)
+                if size > 0:
+                    self.log(
+                        f"BUY CREATE, {self.dataclose[0]:.2f} "
+                        f"(Class: {class_name}, Conf: {confidence:.2%}, "
+                        f"Regime: {detected_regime.value})"
+                    )
+                    self.order = self.buy(size=size)
+        else:
+            # --- SELL: predicted DOWN with sufficient confidence + hold guard ---
+            bars_held = len(self) - self.entry_bar
+            if bars_held < min_hold_days:
                 return
 
-            data_window = {
-                'open': list(self.datas[0].open.get(ago=0, size=lookback)),
-                'high': list(self.datas[0].high.get(ago=0, size=lookback)),
-                'low': list(self.datas[0].low.get(ago=0, size=lookback)),
-                'close': list(self.datas[0].close.get(ago=0, size=lookback)),
-                'volume': list(self.datas[0].volume.get(ago=0, size=lookback)),
-            }
-            # Dates
-            dates = [
-                bt.num2date(d) for d in self.datas[0].datetime.get(ago=0, size=lookback)
-            ]
+            if predicted_class == 0 and confidence >= confidence_threshold:
+                self.log(
+                    f"SELL CREATE, {self.dataclose[0]:.2f} "
+                    f"(Class: {class_name}, Conf: {confidence:.2%}, "
+                    f"Regime: {detected_regime.value}, Held: {bars_held}d)"
+                )
+                self.order = self.close()
 
-            df = pd.DataFrame(data_window)
-            df['date_time'] = dates
-            df.set_index('date_time', inplace=True)
+    # ------------------------------------------------------------------
+    # Position sizing
+    # ------------------------------------------------------------------
 
-            # 2. Features
-            features_df = self.feature_engineer.create_features(df)
-            if features_df.empty:
-                return
+    def _calc_position_size(
+        self, features_df: pd.DataFrame, position_scale: float
+    ) -> int:
+        """Compute ATR-based position size with regime scale.
 
-            # 3. Predict
-            current_features = features_df.iloc[[-1]]
-            scaled_features = self.feature_engineer.extract_feature_vector(
-                current_features, fit_scaler=False
+        Args:
+            features_df: Feature DataFrame (must contain ``atr`` column).
+            position_scale: Regime-dependent multiplier (0.0–1.0).
+
+        Returns:
+            Number of shares to buy (≥ 0).
+        """
+        atr = features_df.iloc[-1].get("atr", None)
+        if atr and atr > 0:
+            risk_amount = self.broker.get_cash() * 0.02  # 2 % risk per trade
+            size = int(risk_amount / (atr * 2) * position_scale)
+        else:
+            # Fallback: fraction of cash
+            size = int(
+                self.broker.get_cash()
+                * self.params.risk_per_trade
+                * position_scale
+                / self.dataclose[0]
             )
-
-            prediction = self.predictor.predict_next(scaled_features)
-            self.predictions.append(prediction)
-
-            # 4. Trading Logic
-            threshold = self.params.threshold
-
-            if not self.position:
-                if prediction > threshold:
-                    # BUY
-                    size = int(self.broker.get_cash() * self.params.risk_per_trade / self.dataclose[0])
-                    if size > 0:
-                        self.log(f'BUY CREATE, {self.dataclose[0]:.2f} (Pred: {prediction:.4f})')
-                        self.order = self.buy(size=size)
-
-            else:
-                # Sell rule: Signal reversal or Stop loss/Take profit (not implemented here)
-                if prediction < -threshold:
-                    # SELL (Exit)
-                    self.log(f'SELL CREATE, {self.dataclose[0]:.2f} (Pred: {prediction:.4f})')
-                    self.order = self.close()
-
-        except Exception:
-            # logger.error(f"Strategy error: {e}")
-            pass
+        return max(size, 0)

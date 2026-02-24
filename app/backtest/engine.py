@@ -11,16 +11,17 @@ from app.repositories.stock_repo_sync import SyncStockRepository
 logger = logging.getLogger(__name__)
 
 class BacktestEngine:
-    def __init__(self, initial_cash=10000.0, commission=0.001):
+    def __init__(self, initial_cash=10000.0, commission=0.001, regime_aware=True):
         self.initial_cash = initial_cash
         self.commission = commission
+        self.regime_aware = regime_aware
 
     def run(self, symbol: str, start_date: datetime, end_date: datetime):
         """Run backtest for a single symbol."""
         cerebro = bt.Cerebro()
 
         # 1. Strategy
-        cerebro.addstrategy(MLStrategy)
+        cerebro.addstrategy(MLStrategy, regime_aware=self.regime_aware)
 
         # 2. Data
         session = SessionLocal()
@@ -63,6 +64,7 @@ class BacktestEngine:
         cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name='sharpe')
         cerebro.addanalyzer(bt.analyzers.DrawDown, _name='drawdown')
         cerebro.addanalyzer(bt.analyzers.Returns, _name='returns')
+        cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name='trades')
 
         # 5. Run
         logger.info(f"Starting Portfolio Value: {cerebro.broker.getvalue():.2f}")
@@ -77,11 +79,20 @@ class BacktestEngine:
         drawdown = strat.analyzers.drawdown.get_analysis().get('max', {}).get('drawdown', 0.0)
         total_return = strat.analyzers.returns.get_analysis().get('rtot', 0.0)
 
+        # Extract trade stats
+        trade_analysis = strat.analyzers.trades.get_analysis()
+        total_closed = trade_analysis.get('total', {}).get('closed', 0)
+        won_total = trade_analysis.get('won', {}).get('total', 0)
+        win_rate = (won_total / total_closed * 100) if total_closed > 0 else 0.0
+
         return {
             'symbol': symbol,
             'initial_cash': self.initial_cash,
             'final_value': final_value,
             'return_pct': (final_value - self.initial_cash) / self.initial_cash * 100,
             'sharpe': sharpe,
-            'drawdown': drawdown
+            'drawdown': drawdown,
+            'total_trades': total_closed,
+            'win_rate': win_rate,
+            'regime_aware': self.regime_aware,
         }

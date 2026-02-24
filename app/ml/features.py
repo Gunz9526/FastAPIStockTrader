@@ -10,6 +10,8 @@ from app.ml.sector_map import get_sector_id
 
 logger = logging.getLogger(__name__)
 
+_MODEL_PATH = os.getenv("MODEL_SAVE_PATH", "model_artifacts")
+
 class FeatureEngineer:
     """
     Production-grade feature engineering using TA-Lib.
@@ -22,7 +24,7 @@ class FeatureEngineer:
 
     def __init__(
         self,
-        scaler_path: str = "/app/model_artifacts/feature_scaler.pkl",
+        scaler_path: str = os.path.join(_MODEL_PATH, "feature_scaler.pkl"),
         sentiment_analyzer = None,
         fundamental_provider = None
     ):
@@ -142,7 +144,7 @@ class FeatureEngineer:
                 df['sector_id'] = get_sector_id(symbol)
             else:
                 logger.warning("No 'symbol' column found - cannot add sector feature")
-                df['sector_id'] = 5  # Unknown sector
+                df['sector_id'] = 12  # Unknown sector (SECTOR_TO_ID['Unknown'] = 12)
 
             # 11. VWAP-based features (if VWAP data available)
             if 'vwap' in df.columns and df['vwap'].notna().any():
@@ -207,7 +209,8 @@ class FeatureEngineer:
         market_avg_volume: float = None,
         sentiment_score: float | None = None,
         fundamental_data: dict[str, float] | None = None,
-        feature_set: str = "legacy"
+        feature_set: str = "legacy",
+        scaler_suffix: str | None = None
     ) -> pd.DataFrame:
         """
         Extract and normalize feature vector for ML model.
@@ -223,6 +226,9 @@ class FeatureEngineer:
                 - "core": 21 features (no Phase F, no momentum)
                 - "base": 27 features (with momentum, no Phase F)
                 - "full": 32 features (all features including Phase F)
+            scaler_suffix: Optional suffix for regime-specific scaler files.
+                When provided, scaler is saved/loaded as
+                ``feature_scaler_{suffix}.pkl`` instead of ``feature_scaler.pkl``.
         
         Returns:
             DataFrame with normalized features ready for model
@@ -237,7 +243,7 @@ class FeatureEngineer:
             # 시장 대비 거래량 피처 추가
             if market_avg_volume is not None and 'volume' in df.columns:
                 df.loc[:, 'relative_volume'] = df['volume'] / market_avg_volume
-            else:
+            elif 'relative_volume' not in df.columns:
                 df.loc[:, 'relative_volume'] = 1.0  # 시장 데이터 없으면 중립값
 
             # Phase F features - add only when needed by feature_set
@@ -293,11 +299,21 @@ class FeatureEngineer:
             if numeric_features:
                 if fit_scaler:
                     X_numeric_scaled = self.scaler.fit_transform(X[numeric_features])
-                    # Scaler 저장
-                    os.makedirs(os.path.dirname(self.scaler_path), mode=0o777, exist_ok=True)
-                    joblib.dump(self.scaler, self.scaler_path)
-                    logger.info("Scaler fitted and saved to %s", self.scaler_path)
+                    # Save scaler with optional regime suffix
+                    if scaler_suffix:
+                        save_path = self.scaler_path.replace('.pkl', f'_{scaler_suffix}.pkl')
+                    else:
+                        save_path = self.scaler_path
+                    os.makedirs(os.path.dirname(save_path), mode=0o777, exist_ok=True)
+                    joblib.dump(self.scaler, save_path)
+                    logger.info("Scaler fitted and saved to %s", save_path)
                 else:
+                    # Try loading regime-specific scaler if suffix provided
+                    if scaler_suffix:
+                        regime_scaler_path = self.scaler_path.replace('.pkl', f'_{scaler_suffix}.pkl')
+                        if os.path.exists(regime_scaler_path):
+                            self.scaler = joblib.load(regime_scaler_path)
+                            logger.debug("Loaded regime scaler from %s", regime_scaler_path)
                     X_numeric_scaled = self.scaler.transform(X[numeric_features])
 
                 # CRITICAL: Build DataFrame in EXACT order of available_features
