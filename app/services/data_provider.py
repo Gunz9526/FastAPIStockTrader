@@ -61,7 +61,7 @@ class AlpacaDataProvider(AbstractDataProvider):
     async def get_current_price(self, symbol: str) -> float:
         """최신 가격 조회 (캐시 없음 - 실시간 필요)"""
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
 
             def _fetch():
                 request = StockBarsRequest(
@@ -126,7 +126,7 @@ class AlpacaDataProvider(AbstractDataProvider):
 
             # Cache miss - fetch from API
             logger.debug(f"캐시 MISS: {symbol} {days}일")
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
 
             def _fetch():
                 request = StockBarsRequest(
@@ -208,7 +208,7 @@ class AlpacaDataProvider(AbstractDataProvider):
         logger.info(f"{symbol}: {len(periods)}개 기간으로 분할하여 요청")
 
         all_data = []
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         for period_idx, (period_start, period_end) in enumerate(periods, 1):
             logger.debug(f"{symbol} [{period_idx}/{len(periods)}]: {period_start.date()} ~ {period_end.date()}")
@@ -277,7 +277,7 @@ class AlpacaDataProvider(AbstractDataProvider):
                 logger.warning(f"잘못된 수량 {quantity} for {symbol}")
                 return None
 
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
 
             def _place():
                 order_side = OrderSide.BUY if side.lower() == 'buy' else OrderSide.SELL
@@ -315,7 +315,7 @@ class AlpacaDataProvider(AbstractDataProvider):
                 return cached
 
             logger.debug("캐시 MISS: 계정 정보")
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
 
             def _fetch():
                 account = self.trading_client.get_account()
@@ -353,7 +353,7 @@ class AlpacaDataProvider(AbstractDataProvider):
                 return cached
 
             logger.debug(f"캐시 MISS: 포지션 {symbol}")
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
 
             def _fetch():
                 try:
@@ -386,7 +386,7 @@ class AlpacaDataProvider(AbstractDataProvider):
     async def close_position(self, symbol: str, qty: int | None = None) -> bool:
         """Close position and invalidate cache."""
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
 
             def _close():
                 if qty is None:

@@ -76,34 +76,29 @@ def update_trailing_stops(self):
     """
     트레일링 스톱 업데이트 (동기 버전).
 
-    각 오픈 포지션에 대해:
+    각 활성 PositionTracking에 대해:
     1. 최신 일봉 가격 조회
     2. ATR 기반 트레일링 스톱 갱신 (상승만 허용)
     3. 종료 조건 확인 (SL/TP/Trailing Stop)
-    4. 트리거 시 포지션 CLOSED 처리
+    4. 트리거 시 포지션 exit 처리
     """
     session = SessionLocal()
     try:
-        from sqlalchemy import select
-
-        from app.domain.models.stock import Position, PositionStatus
-
-        # 오픈 포지션 가져오기
-        stmt = select(Position).where(Position.status == PositionStatus.OPEN.value)
-        result = session.execute(stmt)
-        positions = list(result.scalars().all())
-
-        if not positions:
-            # 포지션 없으면 조용히 종료 (INFO 로그 불필요)
-            logger.debug("트레일링 스톱: 오픈 포지션 없음 - 스킵")
-            return
-
-        logger.info("트레일링 스톱: %d개 포지션 확인 중...", len(positions))
-
         from datetime import UTC, datetime, timedelta
 
         from app.repositories.stock_repo_sync import SyncStockRepository
         from app.services.risk_manager import RiskManager
+
+        repo = SyncStockRepository(session)
+
+        # 활성 포지션 가져오기 (exit_time IS NULL)
+        positions = repo.get_all_active_positions()
+
+        if not positions:
+            logger.debug("트레일링 스톱: 활성 포지션 없음 - 스킵")
+            return
+
+        logger.info("트레일링 스톱: %d개 포지션 확인 중...", len(positions))
 
         try:
             import numpy as np
@@ -113,7 +108,6 @@ def update_trailing_stops(self):
             _has_talib = False
             logger.warning("talib 미설치 - 고정 비율 트레일링 스톱 사용")
 
-        repo = SyncStockRepository(session)
         risk = RiskManager()
         now = datetime.now(UTC)
         updated_count = 0
@@ -173,22 +167,20 @@ def update_trailing_stops(self):
                     trailing_stop=new_trailing,
                 )
 
-                # 1f. 종료 트리거 시 포지션 상태 업데이트
+                # 1f. 종료 트리거 시 포지션 exit 처리
                 if should_exit:
-                    pos.status = PositionStatus.CLOSED.value
-                    pos.exit_price = current_price
-                    pos.exit_time = now
-                    pos.realized_pl = (current_price - pos.entry_price) * pos.current_qty
+                    realized_pl = (current_price - pos.entry_price) * pos.quantity
+                    repo.update_position_exit(pos.id, current_price)
+                    risk.record_position_exit(pos.symbol)
                     logger.info(
                         "포지션 종료: %s | 사유: %s | 실현 P&L: $%.2f",
-                        pos.symbol, reason, pos.realized_pl,
+                        pos.symbol, reason, realized_pl,
                     )
                     exit_count += 1
+                else:
+                    # 1g. 트레일링 스톱 가격 저장
+                    repo.update_position_stops(pos.id, trailing_stop_price=new_trailing)
 
-                # 1g-h. 포지션 레코드 업데이트
-                pos.trailing_stop_price = new_trailing
-                pos.current_price = current_price
-                pos.unrealized_pl = (current_price - pos.entry_price) * pos.current_qty
                 updated_count += 1
 
             except Exception:
@@ -207,6 +199,321 @@ def update_trailing_stops(self):
 
     except Exception as e:
         logger.error("트레일링 스톱 오류: %s", str(e), exc_info=True)
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+@celery_app.task(
+    name="app.tasks.trading.generate_daily_signals",
+    bind=True,
+    max_retries=2,
+    autoretry_for=(Exception,),
+    retry_backoff=120,
+    retry_backoff_max=600,
+)
+@notify_on_failure("generate_daily_signals")
+def generate_daily_signals(self):
+    """Post-market 일일 ML 예측 생성 및 Redis 캐시 저장.
+
+    워크플로우:
+        1. SPY 기반 시장 regime 감지
+        2. 전 활성 심볼에 대해 feature 생성 → 스케일링 → 예측
+        3. 결과를 ``DailySignalCache``에 저장 (24h TTL)
+        4. Discord 알림으로 요약 전송
+
+    스케줄: 17:30 ET (월-금), ``collect_daily_ohlcv`` (17:00 ET) 이후 실행.
+    """
+    from datetime import datetime
+
+    from pytz import timezone
+
+    et_tz = timezone("America/New_York")
+    current_time = datetime.now(et_tz)
+
+    if current_time.weekday() > 4:
+        logger.info("주말 — 일일 signal 생성 건너뜀")
+        return {"status": "skipped", "reason": "weekend"}
+
+    logger.info("===== 일일 ML Signal 생성 시작 =====")
+
+    session = SessionLocal()
+    try:
+        import pandas as pd
+
+        from app.domain.schemas.signal import CachedSignal
+        from app.ml.features import FeatureEngineer
+        from app.ml.predictor import PredictorService
+        from app.repositories.stock_repo_sync import SyncStockRepository
+        from app.services.regime import RegimeDetector
+        from app.services.signal_cache import daily_signal_cache
+
+        repo = SyncStockRepository(session)
+        predictor = PredictorService()
+        feature_engineer = FeatureEngineer()
+
+        # 1. Regime 감지
+        regime_detector = RegimeDetector()
+        end_date = pd.Timestamp.now(tz="UTC")
+        start_date = end_date - pd.Timedelta(days=90)
+        spy_data = repo.get_ohlcv_range("SPY", start_date, end_date, timeframe="1d")
+
+        if spy_data and len(spy_data) >= 50:
+            spy_df = pd.DataFrame(
+                [
+                    {
+                        "date_time": bar.date_time,
+                        "open": bar.open,
+                        "high": bar.high,
+                        "low": bar.low,
+                        "close": bar.close,
+                        "volume": bar.volume,
+                    }
+                    for bar in spy_data
+                ]
+            )
+            spy_df.set_index("date_time", inplace=True)
+            spy_df.sort_index(inplace=True)
+
+            # Generate features (needed for ADX, SMA, ATR)
+            spy_features = feature_engineer.create_features(spy_df)
+
+            if spy_features.empty:
+                from app.services.regime import MarketRegime
+
+                current_regime = MarketRegime.SIDEWAYS_CALM
+                logger.warning("SPY 특성 생성 실패 — 기본 regime(sideways_calm) 사용")
+            else:
+                # Load VIX from Redis cache
+                vix_value = None
+                try:
+                    from app.core.cache import cache
+
+                    vix_cached = cache.get("vix:latest")
+                    if vix_cached:
+                        vix_value = float(vix_cached)
+                        logger.info("캐시에서 VIX 값 로드: %.2f", vix_value)
+                except Exception:
+                    logger.debug("VIX 캐시 로드 실패 — VIX 없이 regime 감지")
+
+                current_regime = regime_detector.detect_regime(
+                    spy_features, vix_value=vix_value
+                )
+        else:
+            from app.services.regime import MarketRegime
+
+            current_regime = MarketRegime.SIDEWAYS_CALM
+            logger.warning("SPY 데이터 부족 — 기본 regime(sideways_calm) 사용")
+
+        regime_str = current_regime.value
+        logger.info("현재 시장 regime: %s", regime_str)
+
+        # 2. Regime fallback 확인
+        from app.core.config import REGIME_TRADING_CONFIG
+
+        config = REGIME_TRADING_CONFIG.get(regime_str, {})
+        fallback_regime_str = config.get("fallback_to_regime")
+
+        prediction_regime = current_regime
+        if fallback_regime_str:
+            try:
+                from app.services.regime import MarketRegime
+
+                prediction_regime = MarketRegime(fallback_regime_str)
+                logger.info(
+                    "Regime fallback: %s → %s (예측용)",
+                    regime_str,
+                    fallback_regime_str,
+                )
+            except ValueError:
+                logger.warning("잘못된 fallback regime: %s", fallback_regime_str)
+
+        effective_regime = prediction_regime.value
+
+        # 3. 활성 심볼 조회
+        symbols = repo.get_active_symbols()
+        if not symbols:
+            logger.warning("활성 심볼 없음 — signal 생성 스킵")
+            return {"status": "no_symbols"}
+
+        logger.info("%d개 심볼에 대해 signal 생성 중...", len(symbols))
+
+        # 4. 이전 캐시 무효화
+        daily_signal_cache.invalidate_all()
+
+        # 5. 각 심볼별 예측
+        signals: list[CachedSignal] = []
+        error_count = 0
+
+        for symbol in symbols:
+            try:
+                ohlcv = repo.get_ohlcv_range(
+                    symbol, end_date - pd.Timedelta(days=365), end_date, timeframe="1d"
+                )
+                if len(ohlcv) < 50:
+                    logger.debug(
+                        "%s: 데이터 부족 (%d bars < 50), 스킵", symbol, len(ohlcv)
+                    )
+                    continue
+
+                df = pd.DataFrame(
+                    [
+                        {
+                            "date_time": bar.date_time,
+                            "open": bar.open,
+                            "high": bar.high,
+                            "low": bar.low,
+                            "close": bar.close,
+                            "volume": bar.volume,
+                            "symbol": symbol,
+                        }
+                        for bar in ohlcv
+                    ]
+                )
+                df.set_index("date_time", inplace=True)
+                df.sort_index(inplace=True)
+
+                features_df = feature_engineer.create_features(df)
+                if features_df.empty:
+                    continue
+
+                latest = features_df.iloc[[-1]]
+                scaled = feature_engineer.extract_feature_vector(
+                    latest,
+                    fit_scaler=False,
+                    feature_set="base",
+                    scaler_suffix=effective_regime,
+                )
+
+                pred_class, confidence, probs = predictor.predict_class(
+                    scaled, regime=prediction_regime
+                )
+
+                sig = CachedSignal(
+                    symbol=symbol,
+                    predicted_class=pred_class,
+                    confidence=confidence,
+                    probabilities=probs,
+                    regime=regime_str,
+                    generated_at=datetime.now(),
+                )
+                signals.append(sig)
+
+            except Exception:
+                logger.error("%s signal 생성 실패", symbol, exc_info=True)
+                error_count += 1
+
+        # 6. Redis 저장
+        cached_count = daily_signal_cache.set_signals_bulk(signals)
+
+        # 7. 요약 통계
+        up_count = sum(1 for s in signals if s.predicted_class == 2)
+        neutral_count = sum(1 for s in signals if s.predicted_class == 1)
+        down_count = sum(1 for s in signals if s.predicted_class == 0)
+        avg_conf = (
+            sum(s.confidence for s in signals) / len(signals) if signals else 0.0
+        )
+
+        summary = (
+            f"📊 일일 ML Signal 생성 완료\n"
+            f"Regime: {regime_str}\n"
+            f"총 {cached_count}개 signal 캐시됨 (에러: {error_count})\n"
+            f"UP: {up_count} | NEUTRAL: {neutral_count} | DOWN: {down_count}\n"
+            f"평균 confidence: {avg_conf:.1%}"
+        )
+        logger.info(summary)
+
+        # 8. Discord 알림
+        try:
+            from app.services.discord_notifier import discord_notifier
+
+            discord_notifier.send_success("daily_signals", summary)
+        except Exception:
+            logger.debug("Discord 알림 전송 실패 (무시)")
+
+        return {
+            "status": "success",
+            "regime": regime_str,
+            "signals_cached": cached_count,
+            "errors": error_count,
+            "up": up_count,
+            "neutral": neutral_count,
+            "down": down_count,
+            "avg_confidence": round(avg_conf, 4),
+        }
+
+    except Exception as e:
+        logger.error("일일 signal 생성 오류: %s", str(e), exc_info=True)
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+@celery_app.task(
+    name="app.tasks.trading.execute_intraday_entries",
+    bind=True,
+    max_retries=2,
+    autoretry_for=(Exception,),
+    retry_backoff=30,
+    retry_backoff_max=300,
+)
+@notify_on_failure("execute_intraday_entries")
+def execute_intraday_entries(self):
+    """15min intraday entry/exit cycle (Phase L.2c).
+
+    Scans for entry (RSI/MACD + daily ML UP) and exit (trailing stop,
+    daily DOWN, signal expired) conditions using ``DualTimeframeOrchestrator``.
+
+    Workflow:
+        1. Feature flag gate (``DUAL_TIMEFRAME_ENABLED``)
+        2. Market hours guard (9:30–16:00 ET)
+        3. Delegate to ``SyncTradingStrategy.process_intraday_cycle()``
+
+    Schedule: ``*/15`` (9–15h ET, Mon–Fri), same cadence as 15min OHLCV collection.
+    """
+    from app.core.config import settings as app_settings
+
+    # 1. Feature flag gate
+    if not app_settings.DUAL_TIMEFRAME_ENABLED:
+        logger.debug("execute_intraday_entries: DUAL_TIMEFRAME_ENABLED=False — 건너뛰기")
+        return {"status": "disabled"}
+
+    # 2. Market hours guard
+    from app.services.intraday_features import is_market_hours
+
+    if not is_market_hours():
+        logger.debug("execute_intraday_entries: 장외 시간 — 건너뛰기")
+        return {"status": "outside_hours"}
+
+    logger.info("===== Intraday entry/exit 사이클 시작 =====")
+
+    session = SessionLocal()
+    try:
+        from app.repositories.stock_repo_sync import SyncStockRepository
+        from app.services.trading_strategy_sync import SyncTradingStrategy
+
+        strategy = SyncTradingStrategy(session)
+        repo = SyncStockRepository(session)
+
+        # Get active symbols from DB
+        symbols = repo.get_active_symbols()
+        if not symbols:
+            logger.warning("execute_intraday_entries: 활성 심볼 없음")
+            return {"status": "no_symbols"}
+
+        logger.info("execute_intraday_entries: %d개 심볼 스캔", len(symbols))
+
+        # Delegate to strategy
+        result = strategy.process_intraday_cycle(symbols)
+
+        session.commit()
+        logger.info("===== Intraday 사이클 완료: %s =====", result)
+        return result
+
+    except Exception as e:
+        logger.error("execute_intraday_entries 오류: %s", str(e), exc_info=True)
         session.rollback()
         raise
     finally:

@@ -20,10 +20,10 @@ logger.setLevel(logging.DEBUG)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: Init DB, connection pools, etc.
-    print("Application Startup")
+    logger.info("Application Startup")
     yield
     # Shutdown: Close connections
-    print("Application Shutdown")
+    logger.info("Application Shutdown")
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -59,7 +59,13 @@ async def metrics_middleware(request: Request, call_next):
     )
 
     start_time = time.time()
-    response = await call_next(request)
+    try:
+        response = await call_next(request)
+    except Exception:
+        duration = time.time() - start_time
+        api_requests_total.labels(method=method, endpoint=endpoint, status=500).inc()
+        api_response_time.labels(method=method, endpoint=endpoint).observe(duration)
+        raise
     duration = time.time() - start_time
 
     # Record metrics
@@ -87,5 +93,5 @@ async def metrics():
     return metrics_endpoint()
 
 @app.get("/health")
-async def health_check(request: Request):
+async def health_check():
     return {"status": "healthy"}

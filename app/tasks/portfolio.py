@@ -13,12 +13,6 @@ from app.worker import celery_app
 
 logger = logging.getLogger(__name__)
 
-# 심볼 목록 (확장 가능)
-# PORTFOLIO_SYMBOLS = [
-#     'AAPL', 'MSFT', 'GOOGL', 'NVDA', 'TSLA',
-#     'META', 'AMZN', 'AMD', 'NFLX', 'SPY'
-# ]
-
 def get_portfolio_symbols():
     session = SessionLocal()
     try:
@@ -28,6 +22,7 @@ def get_portfolio_symbols():
 
     except Exception as e:
         logger.error("포트폴리오 심볼 조회 실패: %s", str(e), exc_info=True)
+        return []
     finally:
         session.close()
 

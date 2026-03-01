@@ -244,6 +244,7 @@ class PortfolioRepository:
             query = select(StockOHLCV).where(
                 and_(
                     StockOHLCV.symbol == symbol,
+                    StockOHLCV.timeframe == timeframe,
                     StockOHLCV.date_time >= start_date,
                     StockOHLCV.date_time <= end_date
                 )

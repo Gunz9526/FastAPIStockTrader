@@ -1120,15 +1120,25 @@ class EnsembleClassifierWrapper(ModelWrapper):
     def load(self, path: str) -> None:
         """Load ensemble model and metadata from disk.
 
-        Restores ``feature_names_in_`` on the XGBoost sub-estimator so that
-        subsequent ``predict`` / ``predict_proba`` calls work correctly.
+        Handles XGBoost 2.0+ pickle compatibility by temporarily allowing
+        ``feature_names_in_`` assignment during deserialization.
 
         Args:
             path: File path of the pickle file (``*.pkl``).
         """
         import json
 
-        self.model = joblib.load(path)
+        try:
+            self.model = joblib.load(path)
+        except (AttributeError, TypeError) as exc:
+            if "feature_names_in_" in str(exc):
+                logger.warning(
+                    "XGBoost pickle compat issue detected — retrying with workaround: %s",
+                    exc,
+                )
+                self.model = self._load_with_xgb_compat(path)
+            else:
+                raise
 
         metadata_path = path.replace(".pkl", "_metadata.json")
         if os.path.exists(metadata_path):
@@ -1139,13 +1149,47 @@ class EnsembleClassifierWrapper(ModelWrapper):
             feature_names = self.metadata.get("feature_names")
             if feature_names and hasattr(self.model, "named_estimators_"):
                 xgb_est = self.model.named_estimators_.get("xgb")
-                if xgb_est:
-                    xgb_est.feature_names_in_ = np.array(feature_names)
+                if xgb_est is not None:
+                    try:
+                        xgb_est.feature_names_in_ = np.array(feature_names)
+                    except (AttributeError, TypeError):
+                        xgb_est.__dict__["feature_names_in_"] = np.array(feature_names)
                     logger.debug(
                         "Restored feature_names_in_ to XGBClassifier: %s...",
                         feature_names[:3],
                     )
         logger.info("EnsembleClassifier loaded from %s", path)
+
+    @staticmethod
+    def _load_with_xgb_compat(path: str) -> VotingClassifier:
+        """Load a pickled VotingClassifier with XGBoost compatibility.
+
+        Temporarily patches ``XGBClassifier.feature_names_in_`` as a
+        writable attribute so that ``pickle.load`` (called by joblib)
+        can restore the object without raising ``AttributeError``.
+
+        Args:
+            path: File path of the pickle file.
+
+        Returns:
+            Loaded VotingClassifier instance.
+        """
+        original_prop = None
+        patched = False
+        try:
+            if isinstance(
+                getattr(type(XGBClassifier), "feature_names_in_", None),
+                property,
+            ):
+                original_prop = type(XGBClassifier).feature_names_in_
+                type(XGBClassifier).feature_names_in_ = None  # type: ignore[assignment]
+                patched = True
+
+            model = joblib.load(path)
+            return model
+        finally:
+            if patched and original_prop is not None:
+                type(XGBClassifier).feature_names_in_ = original_prop  # type: ignore[assignment]
 
     # ------------------------------------------------------------------
     # Private helpers

@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends
 
-from app.api.v1.endpoints import alpaca, model, operations, rag, stocks
+from app.api.v1.endpoints import alpaca, model, momentum, operations, rag, signals, stocks
 from app.core.security import get_api_key
 
 api_router = APIRouter()
@@ -32,5 +32,17 @@ api_router.include_router(
     alpaca.router,
     prefix="/alpaca",
     tags=["alpaca"],
+    dependencies=[Depends(get_api_key)],
+)
+api_router.include_router(
+    signals.router,
+    prefix="/signals",
+    tags=["signals"],
+    dependencies=[Depends(get_api_key)],
+)
+api_router.include_router(
+    momentum.router,
+    prefix="/momentum",
+    tags=["momentum"],
     dependencies=[Depends(get_api_key)],
 )

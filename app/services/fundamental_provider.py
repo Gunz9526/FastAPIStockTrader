@@ -3,7 +3,7 @@
 Phase F.2: yfinance API를 사용한 재무지표 수집
 """
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from functools import lru_cache
 
 import yfinance as yf
@@ -25,8 +25,7 @@ class FundamentalDataProvider:
     """
 
     def __init__(self):
-        self._cache_ttl = timedelta(hours=24)  # Fundamentals change daily
-        self._cache = {}  # Simple in-memory cache (symbol -> data)
+        pass
 
     @lru_cache(maxsize=500)
     def get_fundamentals(self, symbol: str) -> dict[str, float | None]:

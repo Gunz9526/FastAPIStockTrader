@@ -116,6 +116,11 @@ circuit_breaker_triggers = Counter(
     ['reason']  # max_daily_trades, max_daily_loss, cooldown
 )
 
+circuit_breaker_state = Gauge(
+    'circuit_breaker_state',
+    'Circuit breaker state (0=closed, 1=half_open, 2=open)'
+)
+
 stop_loss_triggers = Counter(
     'stop_loss_triggers_total',
     'Number of stop-loss triggers',

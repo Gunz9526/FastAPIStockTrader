@@ -5,6 +5,7 @@ import pandas as pd
 
 from app.core.database import SessionLocal
 from app.repositories.stock_repo_sync import SyncStockRepository
+from app.services.momentum_scorer import CrossSectionalMomentum
 from app.worker import celery_app
 
 logger = logging.getLogger(__name__)
@@ -126,3 +127,37 @@ def analyze_market():
         raise
     finally:
         session.close()
+
+
+@celery_app.task(
+    name="app.tasks.market_analysis.compute_momentum_scores",
+    bind=True,
+    max_retries=2,
+    default_retry_delay=60,
+)
+def compute_momentum_scores(self):
+    """Compute cross-sectional momentum rankings for all active symbols.
+
+    Phase M.1 — Runs post-market after OHLCV collection.
+    Stores results in Redis (momentum:scores:{date}, momentum:sectors:{date}).
+
+    Returns:
+        dict with ``scored_count`` and ``status``.
+    """
+    logger.info("=" * 60)
+    logger.info("Cross-Sectional Momentum 스코어링 시작")
+    logger.info("=" * 60)
+
+    try:
+        scorer = CrossSectionalMomentum()
+        count = scorer.compute_and_cache()
+
+        logger.info("=" * 60)
+        logger.info("Momentum 스코어링 완료: %d개 심볼", count)
+        logger.info("=" * 60)
+
+        return {"scored_count": count, "status": "success"}
+
+    except Exception as exc:
+        logger.error("Momentum 스코어링 오류: %s", exc, exc_info=True)
+        raise self.retry(exc=exc)

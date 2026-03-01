@@ -65,14 +65,14 @@ class RiskManager:
         self._cooldown_ttl_seconds: int = self.cooldown_bars * self.bars_per_cycle * 60
         self._entry_time_ttl_seconds: int = 86400 * 7  # 7 days (daily trading)
 
-    def _reset_if_new_day(self):
+    def _reset_if_new_day(self) -> None:
         """Reset daily counters if new trading day."""
         today = date.today()
         if today != self.current_date:
             self.current_date = today
             self.daily_trades[today] = 0
             self.daily_pnl[today] = 0.0
-            logger.info(f"새 거래일 시작: {today}")
+            logger.info("새 거래일 시작: %s", today)
 
     def apply_symbol_filters(self, symbol: str, price: float, volume: float) -> bool:
         """
@@ -99,19 +99,60 @@ class RiskManager:
     def can_trade_today(self) -> bool:
         """Check if we can place more trades today."""
         self._reset_if_new_day()
-        today = self.current_date
+        today = date.today()
+        today_str = today.isoformat()
 
-        # Trade count limit
-        if self.daily_trades[today] >= self.max_trades_per_day:
-            logger.warning(f"일일 거래 한도 도달: {self.daily_trades[today]}")
+        # Trade count from Redis
+        trade_count = 0
+        try:
+            raw = cache.get(f"risk:daily_trades:{today_str}")
+            if raw is not None:
+                trade_count = int(raw)
+        except Exception:
+            trade_count = self.daily_trades.get(today, 0)
+
+        if trade_count >= self.max_trades_per_day:
+            logger.warning("일일 거래 한도 도달: %d", trade_count)
             return False
 
-        # Loss limit
-        if self.daily_pnl[today] <= -self.daily_loss_limit:
-            logger.warning(f"일일 손실 한도 도달: ${self.daily_pnl[today]:.2f}")
+        # PnL from Redis
+        daily_pnl = 0.0
+        try:
+            raw = cache.get(f"risk:daily_pnl:{today_str}")
+            if raw is not None:
+                daily_pnl = float(raw)
+        except Exception:
+            daily_pnl = self.daily_pnl.get(today, 0.0)
+
+        if daily_pnl <= -self.daily_loss_limit:
+            logger.warning("일일 손실 한도 도달: $%.2f", daily_pnl)
             return False
 
         return True
+
+    def _increment_daily_trades(self) -> None:
+        """Increment daily trade count in both memory and Redis."""
+        today = date.today()
+        self.daily_trades[today] = self.daily_trades.get(today, 0) + 1
+        try:
+            key = f"risk:daily_trades:{today.isoformat()}"
+            current = cache.get(key)
+            new_val = (int(current) + 1) if current is not None else 1
+            cache.set(key, new_val, ttl_seconds=172800)  # 48h
+        except Exception as e:
+            logger.debug("Redis daily_trades write failed: %s", e)
+
+    def _add_daily_pnl(self, pnl: float) -> None:
+        """Add to daily P&L in both memory and Redis."""
+        today = date.today()
+        self.daily_pnl[today] = self.daily_pnl.get(today, 0.0) + pnl
+        try:
+            key = f"risk:daily_pnl:{today.isoformat()}"
+            current = cache.get(key)
+            new_val = (float(current) + pnl) if current is not None else pnl
+            cache.set(key, new_val, ttl_seconds=172800)  # 48h
+        except Exception as e:
+            logger.debug("Redis daily_pnl write failed: %s", e)
 
     def calculate_position_size(
         self,
@@ -329,16 +370,19 @@ class RiskManager:
         price: float,
         quantity: int,
         realized_pl: float = 0.0
-    ):
+    ) -> None:
         """Record a trade for daily tracking."""
         self._reset_if_new_day()
-        today = self.current_date
-
-        self.daily_trades[today] += 1
+        self._increment_daily_trades()
 
         if action == 'SELL' and realized_pl != 0:
-            self.daily_pnl[today] += realized_pl
-            logger.info(f"일일 손익: ${self.daily_pnl[today]:.2f} ({self.daily_trades[today]} 건)")
+            self._add_daily_pnl(realized_pl)
+            today = date.today()
+            logger.info(
+                "일일 손익: $%.2f (%d 건)",
+                self.daily_pnl.get(today, 0.0),
+                self.daily_trades.get(today, 0),
+            )
 
     def add_to_blacklist(self, symbol: str):
         """Add symbol to blacklist."""

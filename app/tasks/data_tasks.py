@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 
 import yfinance as yf
 
@@ -54,7 +54,7 @@ def collect_fundamentals():
                     'pbr': info.get('priceToBook'),
                     'roe': info.get('returnOnEquity'),
                     'sector': info.get('sector'),
-                    'date': datetime.utcnow()
+                    'date': datetime.now(UTC).date()
                 }
 
                 # Upsert (update or insert)

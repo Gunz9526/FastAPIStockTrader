@@ -1,6 +1,8 @@
 """
-일봉 OHLCV 데이터 수집 및 VWAP 계산.
-활성 거래 심볼에 대해 장 마감 후 일봉 데이터를 수집합니다.
+OHLCV 데이터 수집: 일봉(1d) + 15분봉(15m).
+
+일봉: 장 마감 후(17:00 ET) 1회 수집.
+15분봉: 장중(9:45–15:45 ET) 15분 간격 수집 (Phase L.2a).
 """
 import logging
 from datetime import datetime, timedelta
@@ -13,6 +15,7 @@ from pytz import timezone
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.repositories.stock_repo_sync import SyncStockRepository
+from app.services.intraday_features import is_market_hours
 from app.worker import celery_app
 
 logger = logging.getLogger(__name__)
@@ -141,5 +144,177 @@ def collect_daily_ohlcv():
         logger.error(f"일봉 수집 오류: {e}", exc_info=True)
         session.rollback()
         raise
+    finally:
+        session.close()
+
+
+# ---------------------------------------------------------------------------
+# Phase L.2a: 15min OHLCV Collection
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.realtime_data.collect_15min_ohlcv",
+    bind=True,
+    max_retries=2,
+    default_retry_delay=60,
+)
+def collect_15min_ohlcv(self):
+    """
+    15분봉 OHLCV 데이터를 수집합니다.
+
+    장중(9:45–15:45 ET) 15분 간격으로 실행됩니다.
+    Feature flag `DUAL_TIMEFRAME_ENABLED` 가 False이면 건너뜁니다.
+
+    Phase L.2a: 데이터 인프라만 구축. 실제 매매 진입은 L.2c에서 연결합니다.
+    """
+    # Feature flag check
+    if not settings.DUAL_TIMEFRAME_ENABLED:
+        logger.debug("15분봉 수집 건너뜀: DUAL_TIMEFRAME_ENABLED=False")
+        return {"status": "skipped", "reason": "feature_flag_disabled"}
+
+    et_tz = timezone("America/New_York")
+    current_time = datetime.now(et_tz)
+
+    # Market hours guard — only collect during trading hours
+    if not is_market_hours(current_time):
+        logger.debug(
+            f"15분봉 수집 건너뜀: 장외 시간 "
+            f"({current_time.strftime('%Y-%m-%d %H:%M ET')})"
+        )
+        return {"status": "skipped", "reason": "outside_market_hours"}
+
+    logger.info("15분봉 데이터 수집 시작...")
+
+    session = SessionLocal()
+    try:
+        repo = SyncStockRepository(session)
+
+        # Get active symbols
+        symbols = repo.get_active_symbols()
+        if not symbols:
+            logger.warning("15분봉 수집 대상 활성 심볼이 없습니다")
+            return {"status": "no_symbols"}
+
+        logger.info(f"{len(symbols)}개 심볼에 대해 15분봉 데이터 수집 중")
+
+        # Initialize Alpaca client
+        data_client = StockHistoricalDataClient(
+            api_key=settings.ALPACA_API_KEY,
+            secret_key=settings.ALPACA_SECRET_KEY,
+        )
+
+        # Fetch last 2 hours of 15min bars (8 bars buffer for indicator computation)
+        end_time = current_time
+        start_time = end_time - timedelta(hours=2)
+
+        success_count = 0
+        error_count = 0
+
+        for symbol in symbols:
+            try:
+                request = StockBarsRequest(
+                    symbol_or_symbols=[symbol],
+                    timeframe=TimeFrame(15, TimeFrameUnit.Minute),
+                    start=start_time,
+                    end=end_time,
+                    feed="iex",  # Free tier compatible
+                )
+
+                bars_response = data_client.get_stock_bars(request)
+
+                if not bars_response or not bars_response.data:
+                    logger.debug(f"{symbol}: 15분봉 데이터 없음")
+                    continue
+
+                symbol_bars = bars_response.data.get(symbol, [])
+                if not symbol_bars:
+                    logger.debug(f"{symbol}: 15분봉 바 목록 비어있음")
+                    continue
+
+                # Process each bar
+                inserted_bars = 0
+                updated_bars = 0
+
+                for bar in symbol_bars:
+                    existing = repo.get_ohlcv_by_datetime(
+                        symbol, bar.timestamp, timeframe="15m"
+                    )
+
+                    if existing:
+                        # Update existing bar (in case of corrections)
+                        existing.open = float(bar.open)
+                        existing.high = float(bar.high)
+                        existing.low = float(bar.low)
+                        existing.close = float(bar.close)
+                        existing.volume = float(bar.volume)
+                        existing.vwap = (
+                            float(bar.vwap)
+                            if hasattr(bar, "vwap") and bar.vwap
+                            else None
+                        )
+                        existing.trade_count = (
+                            int(bar.trade_count)
+                            if hasattr(bar, "trade_count") and bar.trade_count
+                            else None
+                        )
+                        updated_bars += 1
+                    else:
+                        from app.domain.schemas.stock import StockOHLCVCreate
+
+                        ohlcv_data = StockOHLCVCreate(
+                            symbol=symbol,
+                            date_time=bar.timestamp,
+                            open=float(bar.open),
+                            high=float(bar.high),
+                            low=float(bar.low),
+                            close=float(bar.close),
+                            volume=float(bar.volume),
+                            adj_close=None,
+                            timeframe="15m",
+                            vwap=(
+                                float(bar.vwap)
+                                if hasattr(bar, "vwap") and bar.vwap
+                                else None
+                            ),
+                            trade_count=(
+                                int(bar.trade_count)
+                                if hasattr(bar, "trade_count") and bar.trade_count
+                                else None
+                            ),
+                        )
+
+                        repo.create_ohlcv(ohlcv_data)
+                        inserted_bars += 1
+
+                success_count += 1
+                logger.debug(
+                    f"{symbol}: 15분봉 신규 {inserted_bars}개, 갱신 {updated_bars}개"
+                )
+
+            except Exception as e:
+                error_count += 1
+                logger.error(f"{symbol} 15분봉 데이터 수집 실패: {e}")
+                continue
+
+        session.commit()
+        logger.info(
+            f"15분봉 수집 완료: 성공 {success_count}건, 오류 {error_count}건"
+        )
+
+        return {
+            "status": "completed",
+            "success": success_count,
+            "errors": error_count,
+            "total": len(symbols),
+        }
+
+    except Exception as e:
+        logger.error(f"15분봉 수집 오류: {e}", exc_info=True)
+        session.rollback()
+        try:
+            self.retry(exc=e)
+        except self.MaxRetriesExceededError:
+            logger.error("15분봉 수집 최대 재시도 초과")
+            raise
     finally:
         session.close()

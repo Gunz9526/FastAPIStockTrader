@@ -1,0 +1,137 @@
+======================================================================
+MODEL TRAINING REPORT
+Generated: 2026-02-25 14:38:18
+======================================================================
+
+REGIME PERFORMANCE SUMMARY
+------------------------------------------------------------------------------------------
+Regime               Samples    Accuracy     F1         NEUTRAL_R    Status         
+------------------------------------------------------------------------------------------
+bull_trending        1200       38.33%       0.3756     53.85%       success        
+bear_trending        1740       43.39%       0.4300     30.30%       success        
+sideways_volatile    300        N/A          N/A        N/A          insufficient_data
+sideways_calm        23820      38.12%       0.3802     44.31%       success        
+------------------------------------------------------------------------------------------
+
+DATA DISTRIBUTION BY REGIME
+----------------------------------------------------------------------
+sideways_calm: 23,820 samples (88.0%)
+bear_trending: 1,740 samples (6.4%)
+bull_trending: 1,200 samples (4.4%)
+sideways_volatile: 300 samples (1.1%)
+
+Total samples: 27,060
+----------------------------------------------------------------------
+
+DETAILED METRICS
+----------------------------------------------------------------------
+
+[bull_trending]
+  samples: 1200
+  train_samples: 960
+  validation_samples: 240
+  accuracy: 0.3833
+  f1_score: 0.3756
+  neutral_recall: 0.5385
+  pred_distribution: {1: 114, 0: 72, 2: 54}
+  actual_distribution: {1: 91, 0: 83, 2: 66}
+  status: success
+
+  Classification Report:
+    precision    recall  f1-score   support
+    
+            DOWN       0.32      0.28      0.30        83
+         NEUTRAL       0.43      0.54      0.48        91
+              UP       0.37      0.30      0.33        66
+    
+        accuracy                           0.38       240
+       macro avg       0.37      0.37      0.37       240
+    weighted avg       0.38      0.38      0.38       240
+
+  Top-10 Feature Importance:
+    trade_intensity           112.5697
+    atr_pct                   91.5275
+    vwap_distance             83.0246
+    bb_width                  70.0085
+    volume_ratio              53.6043
+    relative_volume           52.4365
+    trend_strength            51.0708
+    momentum_5                50.4683
+    adx                       44.7945
+    macd_signal               42.1310
+
+[bear_trending]
+  samples: 1740
+  train_samples: 1392
+  validation_samples: 348
+  accuracy: 0.4339
+  f1_score: 0.4300
+  neutral_recall: 0.3030
+  pred_distribution: {2: 183, 0: 83, 1: 82}
+  actual_distribution: {2: 148, 0: 134, 1: 66}
+  status: success
+
+  Classification Report:
+    precision    recall  f1-score   support
+    
+            DOWN       0.52      0.32      0.40       134
+         NEUTRAL       0.24      0.30      0.27        66
+              UP       0.48      0.59      0.53       148
+    
+        accuracy                           0.43       348
+       macro avg       0.41      0.41      0.40       348
+    weighted avg       0.45      0.43      0.43       348
+
+  Top-10 Feature Importance:
+    vwap_distance             439.1202
+    relative_volume           270.1224
+    rsi_momentum              217.7593
+    trade_intensity           211.4193
+    stoch_d                   205.6686
+    stoch_k                   189.7713
+    adx                       178.0515
+    momentum_5                171.1420
+    sector_id                 155.4055
+    macd_signal               144.8886
+
+[sideways_volatile]
+  samples: 300
+  status: insufficient_data
+
+[sideways_calm]
+  samples: 23820
+  train_samples: 19056
+  validation_samples: 4764
+  accuracy: 0.3812
+  f1_score: 0.3802
+  neutral_recall: 0.4431
+  pred_distribution: {1: 1713, 2: 1631, 0: 1420}
+  actual_distribution: {2: 1753, 0: 1596, 1: 1415}
+  status: success
+
+  Classification Report:
+    precision    recall  f1-score   support
+    
+            DOWN       0.38      0.34      0.36      1596
+         NEUTRAL       0.37      0.44      0.40      1415
+              UP       0.40      0.37      0.38      1753
+    
+        accuracy                           0.38      4764
+       macro avg       0.38      0.38      0.38      4764
+    weighted avg       0.38      0.38      0.38      4764
+
+  Top-10 Feature Importance:
+    atr_pct                   625.7275
+    volume_ratio              490.1331
+    sector_id                 480.3831
+    trade_intensity           462.9675
+    vwap_distance             438.6681
+    rsi_momentum              377.1833
+    macd_hist                 365.5123
+    relative_volume           359.1193
+    bb_width                  341.2882
+    momentum_5                298.0760
+
+======================================================================
+END OF REPORT
+======================================================================

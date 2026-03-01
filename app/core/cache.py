@@ -74,16 +74,18 @@ class CacheService:
         except Exception as e:
             logger.error(f"Cache delete error: {e}")
 
-    def clear_pattern(self, pattern: str):
-        """Delete all keys matching pattern."""
+    def clear_pattern(self, pattern: str) -> None:
+        """Delete all keys matching pattern using SCAN (non-blocking)."""
         if not self.enabled:
             return
 
         try:
-            keys = self.redis_client.keys(pattern)
-            if keys:
-                self.redis_client.delete(*keys)
-                logger.info(f"Cleared {len(keys)} keys matching {pattern}")
+            deleted = 0
+            for key in self.redis_client.scan_iter(match=pattern, count=100):
+                self.redis_client.delete(key)
+                deleted += 1
+            if deleted:
+                logger.info(f"Cleared {deleted} keys matching {pattern}")
         except Exception as e:
             logger.error(f"Cache clear error: {e}")
 

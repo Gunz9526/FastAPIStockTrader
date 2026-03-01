@@ -1,6 +1,6 @@
 from typing import Any
 
-from pydantic import AnyHttpUrl, PostgresDsn, RedisDsn, field_validator
+from pydantic import AnyHttpUrl, PostgresDsn, RedisDsn, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -29,19 +29,19 @@ class Settings(BaseSettings):
     CELERY_RESULT_BACKEND: str | None = None
 
     @field_validator("CELERY_BROKER_URL", mode="before")
-    def assemble_celery_broker(cls, v: str | None, values: dict[str, Any]) -> Any:
+    def assemble_celery_broker(cls, v: str | None, info: ValidationInfo) -> Any:
         if isinstance(v, str):
             return v
         # Fallback to REDIS_URL if not explicitly set
-        redis_url = values.data.get("REDIS_URL")
+        redis_url = info.data.get("REDIS_URL")
         return str(redis_url) if redis_url else None
 
     @field_validator("CELERY_RESULT_BACKEND", mode="before")
-    def assemble_celery_backend(cls, v: str | None, values: dict[str, Any]) -> Any:
+    def assemble_celery_backend(cls, v: str | None, info: ValidationInfo) -> Any:
         if isinstance(v, str):
             return v
         # Fallback to REDIS_URL if not explicitly set
-        redis_url = values.data.get("REDIS_URL")
+        redis_url = info.data.get("REDIS_URL")
         return str(redis_url) if redis_url else None
 
 
@@ -50,9 +50,12 @@ class Settings(BaseSettings):
 
     @field_validator("BACKEND_CORS_ORIGINS", mode="before")
     def assemble_cors_origins(cls, v: str | list[str]) -> list[str]:
-        if isinstance(v, str) and not v.startswith("["):
+        if isinstance(v, str):
+            if v.startswith("["):
+                import json
+                return json.loads(v)
             return [i.strip() for i in v.split(",")]
-        elif isinstance(v, (list, str)):
+        elif isinstance(v, list):
             return v
         raise ValueError(v)
 
@@ -65,6 +68,9 @@ class Settings(BaseSettings):
     # Discord Webhook
     DISCORD_WEBHOOK_URL: str | None = None
     DISCORD_TRADING_URL: str | None = None  # 거래 전용 알림
+
+    # Phase L.2: Dual-Timeframe Entry Layer
+    DUAL_TIMEFRAME_ENABLED: bool = False  # Feature flag — enable 15min entry timing
 
     model_config = SettingsConfigDict(
         env_file=".env",

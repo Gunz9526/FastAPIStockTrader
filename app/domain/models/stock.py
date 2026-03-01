@@ -184,6 +184,11 @@ class PositionTracking(Base):
     exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     regime: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
 
+    # Risk management (Phase K trailing stops)
+    stop_loss_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    take_profit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    trailing_stop_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -195,9 +200,3 @@ class PositionTracking(Base):
         if self.exit_price and self.exit_time:
             return (self.exit_price - self.entry_price) * self.quantity
         return None
-
-__table_args__ = (
-    Index('idx_positions_symbol_status', Position.symbol, Position.status),
-    Index('idx_trades_symbol_time', TradeLog.symbol, TradeLog.execution_time),
-    Index('idx_position_tracking_active', PositionTracking.symbol, PositionTracking.exit_time),
-)

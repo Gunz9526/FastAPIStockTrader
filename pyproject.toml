@@ -44,6 +44,7 @@ dependencies = [
     "backtrader==1.9.78.123",
     "google-genai>=1.60.0",
     "flower>=2.0.1",
+    "shap>=0.50.0",
 ]
 
 [tool.setuptools]

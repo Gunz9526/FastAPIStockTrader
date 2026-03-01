@@ -25,7 +25,7 @@ Design, implement, and validate trading strategies and machine learning models f
 - Use **TimeSeriesSplit** for cross-validation (no future data leakage).
 - **CPU-only training** — no GPU. Optimize for 4-core 24GB server.
 - **Ternary Classification**: `predict_class()` returns class (0/1/2), confidence, and probabilities.
-- All models use **daily bars** (`'1d'`). No intraday/15-minute data.
+- All ML models use **daily bars** (`'1d'`). Phase L.2+ adds **15min RSI/MACD** as rule-based (non-ML) entry indicators.
 
 ## FILE OWNERSHIP
 - `app/ml/**` - ML models, features, predictor
@@ -37,7 +37,7 @@ Design, implement, and validate trading strategies and machine learning models f
 Before marking task complete:
 1. No look-ahead bias in feature engineering
 2. Walk-Forward validation implemented correctly
-3. Feature count matches between training and inference (27 base features)
+5. Feature count matches between training and inference (26 base features)
 4. Proper handling of NaN/inf values in features
 5. Model artifacts saved with version info
 6. Performance metrics logged (Sharpe, accuracy, etc.)

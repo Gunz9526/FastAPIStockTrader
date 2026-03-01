@@ -182,9 +182,6 @@ class FeatureEngineer:
             low_20 = talib.MIN(low, timeperiod=20)
             df['price_position'] = (close - low_20) / (high_20 - low_20 + 1e-8)
 
-            # Breakout flag: 1 if close > 20-bar high, else 0
-            df['breakout_flag'] = (close > talib.MAX(high, timeperiod=20)).astype(float)
-
             # 14. Sentiment features (Phase F.1)
             # NOTE: Sentiment is fetched separately and passed as additional context
             # We'll add it during extract_feature_vector if available
@@ -371,7 +368,7 @@ class FeatureEngineer:
         return self.add_technical_indicators(df)
 
     @property
-    def legacy_feature_columns(self) -> list:
+    def legacy_feature_columns(self) -> list[str]:
         """
         Return legacy feature columns (25 features) for compatibility with existing models.
         
@@ -401,7 +398,7 @@ class FeatureEngineer:
         ]
 
     @property
-    def core_feature_columns(self) -> list:
+    def core_feature_columns(self) -> list[str]:
         """
         Return core technical features only (21 features).
         
@@ -427,7 +424,7 @@ class FeatureEngineer:
         ]
 
     @property
-    def base_feature_columns(self) -> list:
+    def base_feature_columns(self) -> list[str]:
         """
         Return base technical indicator features only (for training on historical data).
 
@@ -435,7 +432,7 @@ class FeatureEngineer:
         in historical OHLCV data. Use this for model training on historical data.
 
         Returns:
-            List of 27 base technical indicator feature names (including Phase H.4 momentum)
+            List of 26 base technical indicator feature names (including Phase H.4 momentum)
         """
         return [
             # Core technical indicators (17)
@@ -449,16 +446,15 @@ class FeatureEngineer:
             'sector_id', 'relative_volume',
             # VWAP & liquidity (2)
             'vwap_distance', 'trade_intensity',
-            # Phase H.4: Momentum features for bull regime (6)
+            # Phase H.4: Momentum features for bull regime (5)
             'momentum_5', 'momentum_10',  # Price momentum
             'rsi_momentum',  # RSI trend direction
             'trend_strength',  # Normalized trend measure
             'price_position',  # Position in 20-bar range
-            'breakout_flag',  # Breakout detection
         ]
 
     @property
-    def feature_columns(self) -> list:
+    def feature_columns(self) -> list[str]:
         """
         Return full feature list including Phase F enhancements.
         
@@ -466,7 +462,7 @@ class FeatureEngineer:
         Use this for live prediction when Phase F features are available.
         
         Returns:
-            List of 25 feature names (20 base + 5 Phase F)
+            List of 31 feature names (26 base + 5 Phase F)
         """
         return self.base_feature_columns + [
             'sentiment_score',  # Sentiment feature (Phase F.1)

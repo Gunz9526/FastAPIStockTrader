@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 import numpy as np
 import optuna
 import pandas as pd
-from sklearn.metrics import accuracy_score, classification_report, f1_score
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score
 from sklearn.model_selection import TimeSeriesSplit
 
 from app.core.database import SessionLocal
@@ -35,12 +35,12 @@ MODEL_SAVE_PATH = "model_artifacts"
 CLASSIFICATION_THRESHOLD = 0.005  # ±0.5% daily — wider NEUTRAL band to reduce noise trades
 
 # Regime-specific class weight overrides
-# Addresses: UP over-prediction (all regimes), NEUTRAL collapse (bear_trending)
+# Addresses: Weight oscillation stabilization — symmetric DOWN/UP for bear, moderate NEUTRAL boost
 REGIME_CLASS_WEIGHTS: dict[str, dict[int, float]] = {
-    "bull_trending":      {0: 1.3, 1: 1.2, 2: 1.0},  # Reduce UP bias, slightly boost NEUTRAL
-    "bear_trending":      {0: 1.0, 1: 1.5, 2: 1.3},  # Strongly boost NEUTRAL (was 7/64 = 11%)
-    "sideways_volatile":  {0: 1.2, 1: 1.3, 2: 1.0},  # Reduce UP, boost NEUTRAL
-    "sideways_calm":      {0: 1.2, 1: 1.3, 2: 1.0},  # Reduce UP (2775 vs 1739), boost NEUTRAL
+    "bull_trending":      {0: 1.2, 1: 1.0, 2: 1.0},  # Balanced (recall: D35%/N49%/U32%)
+    "bear_trending":      {0: 1.2, 1: 2.0, 2: 1.2},  # Symmetric D/U, NEUTRAL boost (66 samples, target recall ~25%)
+    "sideways_volatile":  {0: 1.2, 1: 1.3, 2: 1.0},  # No change (insufficient data)
+    "sideways_calm":      {0: 1.2, 1: 1.2, 2: 1.1},  # No change (stable)
 }
 
 
@@ -112,11 +112,13 @@ def _load_and_prepare_data(
             features_df.dropna(inplace=True)
             features_df['target'] = features_df['target'].astype(int)
 
-            # Add relative_volume (market-relative volume)
-            # Note: Using symbol-level average as approximation for market average
+            # Add relative_volume (market-relative volume) — rolling to avoid look-ahead bias
             if 'volume' in features_df.columns:
-                market_avg_volume = features_df['volume'].mean()
-                features_df['relative_volume'] = features_df['volume'] / market_avg_volume
+                # Use expanding mean: each bar uses only past + current volume
+                expanding_avg = features_df['volume'].expanding(min_periods=1).mean()
+                features_df['relative_volume'] = features_df['volume'] / expanding_avg
+                # Handle edge case: first bar would be 1.0 (volume / volume)
+                features_df['relative_volume'] = features_df['relative_volume'].fillna(1.0)
             else:
                 features_df['relative_volume'] = 1.0
 
@@ -334,6 +336,16 @@ def _save_training_report(regime_results: dict, X: pd.DataFrame) -> str:
                     f.write(f"\n  Top-10 Feature Importance:\n")
                     for fname, fval in feat_imp:
                         f.write(f"    {fname:<25} {fval:.4f}\n")
+
+                # Confusion matrix
+                conf_matrix = metrics.get('confusion_matrix')
+                if conf_matrix:
+                    f.write(f"\n  Confusion Matrix (rows=actual, cols=predicted):\n")
+                    f.write(f"    {'':>12} {'DOWN':>8} {'NEUTRAL':>8} {'UP':>8}\n")
+                    labels = ['DOWN', 'NEUTRAL', 'UP']
+                    for i, label in enumerate(labels):
+                        row = conf_matrix[i]
+                        f.write(f"    {label:>12} {row[0]:>8} {row[1]:>8} {row[2]:>8}\n")
             
             f.write("\n" + "=" * 70 + "\n")
             f.write("END OF REPORT\n")
@@ -562,10 +574,18 @@ def _train_regime_specific_models(
         )
 
         # --- 2. Walk-Forward weight calculation on TRAIN portion only ---
+        # Build walk-forward models with regime-specific class weights
+        cat_wf_params = {}
+        lgbm_wf_params = {}
+        xgb_wf_params = {}
+        if regime_weights:
+            cat_wf_params['class_weights'] = [regime_weights[i] for i in range(len(CLASS_NAMES))]
+            lgbm_wf_params['class_weight'] = regime_weights.copy()
+            xgb_wf_params['class_weight'] = regime_weights.copy()
         models_to_eval = [
-            ('catboost', CatBoostClassifierWrapper()),
-            ('lgbm', LGBMClassifierWrapper()),
-            ('xgboost', XGBoostClassifierWrapper()),
+            ('catboost', CatBoostClassifierWrapper(**cat_wf_params)),
+            ('lgbm', LGBMClassifierWrapper(**lgbm_wf_params)),
+            ('xgboost', XGBoostClassifierWrapper(**xgb_wf_params)),
         ]
 
         accuracy_scores: list[float] = []
@@ -647,6 +667,9 @@ def _train_regime_specific_models(
             logger.info(f"  - 예측 분포: {pd.Series(predictions).value_counts().to_dict()}")
             logger.info(f"  - 실제 분포: {y_holdout.value_counts().to_dict()}")
 
+            # Confusion matrix for training report
+            conf_matrix = confusion_matrix(y_holdout.values, predictions, labels=[0, 1, 2])
+
             holdout_results[regime_value] = {
                 'samples': len(X_regime),
                 'train_samples': len(X_train),
@@ -655,6 +678,7 @@ def _train_regime_specific_models(
                 'f1_score': f1,
                 'neutral_recall': neutral_recall,
                 'classification_report': cls_report_str,
+                'confusion_matrix': conf_matrix.tolist(),
                 'pred_distribution': pd.Series(predictions).value_counts().to_dict(),
                 'actual_distribution': y_holdout.value_counts().to_dict(),
                 'status': 'success',
@@ -701,6 +725,104 @@ def _train_regime_specific_models(
             production_ensemble.save(model_path)
 
             logger.info(f"{regime_value.upper()} production classifier saved: {model_filename}")
+
+            # --- 5. SHAP Feature Importance Analysis (Phase M.2) ---
+            try:
+                from app.ml.shap_analyzer import SHAPFeatureSelector
+
+                shap_selector = SHAPFeatureSelector(
+                    model_artifacts_path=MODEL_SAVE_PATH,
+                    shap_sample_size=min(500, len(X_regime_scaled)),
+                )
+                shap_result = shap_selector.analyze_model(
+                    production_ensemble, X_regime_scaled,
+                    feature_names=list(X_regime_scaled.columns),
+                    regime=regime_value,
+                    y=y_regime,
+                )
+
+                # SHAP top-10 로깅
+                shap_top10 = sorted(
+                    shap_result.global_importance.items(),
+                    key=lambda x: x[1], reverse=True,
+                )[:10]
+                logger.info("  %s SHAP Top-10: %s", regime_value, shap_top10)
+                holdout_results[regime_value]['shap_top10'] = shap_top10
+
+                # SHAP 제거 후보 로깅
+                removal = shap_selector.get_removal_candidates(shap_result)
+                if removal:
+                    logger.info("  %s SHAP 제거 후보: %s", regime_value, removal)
+                    holdout_results[regime_value]['shap_removal_candidates'] = removal
+
+            except ImportError:
+                logger.info("  shap 미설치 — SHAP 분석 건너뜀 (pip install shap)")
+            except Exception as e:
+                logger.debug("  SHAP 분석 실패 (%s): %s", regime_value, str(e))
+
+            # --- 6. Adaptive Threshold Optimization (Phase M.3) ---
+            try:
+                from app.ml.threshold_optimizer import AdaptiveThresholdOptimizer
+
+                # Compute raw daily returns for θ optimization
+                if 'close' in X_regime.columns:
+                    raw_returns = X_regime['close'].pct_change().dropna().values
+                    # Align X_regime_scaled and raw_returns lengths
+                    n_ret = len(raw_returns)
+                    n_feat = len(X_regime_scaled)
+                    min_len = min(n_ret, n_feat)
+                    returns_aligned = raw_returns[-min_len:]
+                    X_aligned = X_regime_scaled.iloc[-min_len:]
+
+                    if min_len >= 100:
+                        threshold_optimizer = AdaptiveThresholdOptimizer(
+                            output_dir=MODEL_SAVE_PATH,
+                        )
+                        # θ optimization
+                        regime_cw = REGIME_CLASS_WEIGHTS.get(regime_value)
+                        theta_res = threshold_optimizer.optimize_classification_threshold(
+                            returns=returns_aligned,
+                            X=X_aligned,
+                            regime=regime_value,
+                            class_weights=regime_cw,
+                            n_trials=50,
+                        )
+                        logger.info(
+                            "  %s θ 최적화: θ=%.5f (현재 %.5f), composite=%.4f",
+                            regime_value, theta_res["theta"],
+                            CLASSIFICATION_THRESHOLD, theta_res["composite_score"],
+                        )
+                        holdout_results[regime_value]['adaptive_theta'] = theta_res
+
+                        # Confidence optimization (using holdout data)
+                        if len(X_holdout_scaled) >= 30:
+                            conf_res = threshold_optimizer.optimize_confidence_threshold(
+                                model=production_ensemble,
+                                X=X_holdout_scaled,
+                                y=y_holdout.values,
+                                regime=regime_value,
+                                n_trials=40,
+                            )
+                            logger.info(
+                                "  %s 신뢰도 최적화: threshold=%.3f, "
+                                "trade_score=%.4f, coverage=%.3f",
+                                regime_value, conf_res["confidence"],
+                                conf_res["trade_score"], conf_res["coverage"],
+                            )
+                            holdout_results[regime_value]['adaptive_confidence'] = conf_res
+                    else:
+                        logger.info(
+                            "  %s 적응형 임계값: 데이터 부족 (%d < 100), 건너뜀",
+                            regime_value, min_len,
+                        )
+                else:
+                    logger.debug("  %s close 컬럼 없음 — θ 최적화 건너뜀", regime_value)
+
+            except ImportError:
+                logger.info("  threshold_optimizer 미사용 — 건너뜀")
+            except Exception as e:
+                logger.debug("  적응형 임계값 최적화 실패 (%s): %s", regime_value, str(e))
+
         except Exception as e:
             logger.error(f"{regime_value} 프로덕션 모델 학습 실패: {e}", exc_info=True)
 
@@ -854,22 +976,21 @@ def tune_models(self):
 
 def _calculate_composite_score(
     y_val_values: np.ndarray,
-    predictions: np.ndarray
+    predictions: np.ndarray,
 ) -> tuple:
-    """
-    Calculate composite objective score for classification models.
+    """Calculate composite objective score for classification models.
 
-    Combines accuracy, weighted F1-score, and class balance into
-    a single scalar for Optuna optimization.
+    Combines accuracy, weighted F1-score, class balance, and min_class_recall
+    into a single scalar for Optuna optimization.
 
-    Composite = 0.40 * accuracy + 0.40 * f1_weighted + 0.20 * (1 - class_imbalance)
+    Composite = 0.30 * accuracy + 0.30 * f1_weighted + 0.15 * class_balance + 0.25 * min_class_recall
 
     Args:
-        y_val_values: Actual target values (numpy array, ternary 0/1/2)
-        predictions: Model predictions (numpy array, ternary 0/1/2)
+        y_val_values: Actual target values (numpy array, ternary 0/1/2).
+        predictions: Model predictions (numpy array, ternary 0/1/2).
 
     Returns:
-        Tuple of (composite_score, accuracy, f1_weighted, class_balance_penalty)
+        Tuple of (composite_score, accuracy, f1_weighted, class_balance, min_class_recall).
     """
     # 1. Overall accuracy
     acc = float(accuracy_score(y_val_values, predictions))
@@ -881,13 +1002,32 @@ def _calculate_composite_score(
     unique_preds = np.unique(predictions)
     class_balance = len(unique_preds) / len(CLASS_NAMES)  # 0.33 to 1.0
 
-    composite = (
-        0.40 * acc
-        + 0.40 * f1
-        + 0.20 * class_balance
+    # 4. Per-class recall: detect ANY class collapse (not just NEUTRAL)
+    per_class_recalls = []
+    for cls in range(len(CLASS_NAMES)):  # 0=DOWN, 1=NEUTRAL, 2=UP
+        mask = y_val_values == cls
+        if mask.sum() > 0:
+            recall = float((predictions[mask] == cls).sum()) / float(mask.sum())
+        else:
+            recall = 0.0
+        per_class_recalls.append(recall)
+
+    min_class_recall = min(per_class_recalls)
+
+    logger.debug(
+        "Per-class recalls: DOWN=%.3f, NEUTRAL=%.3f, UP=%.3f | min_class_recall=%.3f",
+        per_class_recalls[0], per_class_recalls[1], per_class_recalls[2], min_class_recall,
     )
 
-    return composite, acc, f1, class_balance
+    # Composite = 0.30 * accuracy + 0.30 * f1_weighted + 0.15 * class_balance + 0.25 * min_class_recall
+    composite = (
+        0.30 * acc
+        + 0.30 * f1
+        + 0.15 * class_balance
+        + 0.25 * min_class_recall
+    )
+
+    return composite, acc, f1, class_balance, min_class_recall
 
 
 def _tune_regime_models(
@@ -916,6 +1056,9 @@ def _tune_regime_models(
     logger.info(f"[{regime_name.upper()}] CatBoost Classifier Tuning ({n_trials} trials)")
     logger.info("=" * 60)
 
+    # Get regime-specific class weights for tuning alignment
+    regime_weights = REGIME_CLASS_WEIGHTS.get(regime_name)
+
     def catboost_objective(trial):
         params = {
             'iterations': trial.suggest_int('iterations', 100, 500),
@@ -923,8 +1066,11 @@ def _tune_regime_models(
             'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3),
             'l2_leaf_reg': trial.suggest_float('l2_leaf_reg', 1, 10),
             'verbose': False,
-            'allow_writing_files': False
+            'allow_writing_files': False,
         }
+        # Inject regime-specific class weights for tuning-training alignment
+        if regime_weights:
+            params['class_weights'] = [regime_weights[i] for i in range(len(CLASS_NAMES))]
 
         model = CatBoostClassifierWrapper(**params)
         tscv = TimeSeriesSplit(n_splits=3)
@@ -937,7 +1083,7 @@ def _tune_regime_models(
             model.train(X_tr, y_tr)
             pred = model.predict(X_val)
 
-            composite, acc, f1, balance = _calculate_composite_score(y_val.values, pred)
+            composite, acc, f1, balance, _ = _calculate_composite_score(y_val.values, pred)
             fold_composites.append(composite)
             fold_accs.append(acc)
             fold_f1s.append(f1)
@@ -977,8 +1123,11 @@ def _tune_regime_models(
             'min_gain_to_split': trial.suggest_float('min_gain_to_split', 0.0, 0.1),
             'reg_alpha': trial.suggest_float('reg_alpha', 0.1, 10),
             'reg_lambda': trial.suggest_float('reg_lambda', 0.1, 10),
-            'verbose': -1
+            'verbose': -1,
         }
+        # Inject regime-specific class weights for tuning-training alignment
+        if regime_weights:
+            params['class_weight'] = regime_weights.copy()
 
         model = LGBMClassifierWrapper(**params)
         tscv = TimeSeriesSplit(n_splits=3)
@@ -991,7 +1140,7 @@ def _tune_regime_models(
             model.train(X_tr, y_tr)
             pred = model.predict(X_val)
 
-            composite, acc, f1, balance = _calculate_composite_score(y_val.values, pred)
+            composite, acc, f1, balance, _ = _calculate_composite_score(y_val.values, pred)
             fold_composites.append(composite)
             fold_accs.append(acc)
             fold_f1s.append(f1)
@@ -1030,8 +1179,11 @@ def _tune_regime_models(
             'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
             'reg_alpha': trial.suggest_float('reg_alpha', 0.1, 10),
             'reg_lambda': trial.suggest_float('reg_lambda', 0.1, 10),
-            'verbosity': 0
+            'verbosity': 0,
         }
+        # Inject regime-specific class weights for tuning-training alignment
+        if regime_weights:
+            params['class_weight'] = regime_weights.copy()
 
         model = XGBoostClassifierWrapper(**params)
         tscv = TimeSeriesSplit(n_splits=3)
@@ -1044,7 +1196,7 @@ def _tune_regime_models(
             model.train(X_tr, y_tr)
             pred = model.predict(X_val)
 
-            composite, acc, f1, balance = _calculate_composite_score(y_val.values, pred)
+            composite, acc, f1, balance, _ = _calculate_composite_score(y_val.values, pred)
             fold_composites.append(composite)
             fold_accs.append(acc)
             fold_f1s.append(f1)
@@ -1119,7 +1271,7 @@ def _tune_models_global(
             model.train(X_tr, y_tr)
             pred = model.predict(X_val)
 
-            composite, acc, f1, balance = _calculate_composite_score(y_val.values, pred)
+            composite, acc, f1, balance, _ = _calculate_composite_score(y_val.values, pred)
             fold_composites.append(composite)
             fold_accs.append(acc)
             fold_f1s.append(f1)
@@ -1179,7 +1331,7 @@ def _tune_models_global(
             model.train(X_tr, y_tr)
             pred = model.predict(X_val)
 
-            composite, acc, f1, balance = _calculate_composite_score(y_val.values, pred)
+            composite, acc, f1, balance, _ = _calculate_composite_score(y_val.values, pred)
             fold_composites.append(composite)
             fold_accs.append(acc)
             fold_f1s.append(f1)
@@ -1238,7 +1390,7 @@ def _tune_models_global(
             model.train(X_tr, y_tr)
             pred = model.predict(X_val)
 
-            composite, acc, f1, balance = _calculate_composite_score(y_val.values, pred)
+            composite, acc, f1, balance, _ = _calculate_composite_score(y_val.values, pred)
             fold_composites.append(composite)
             fold_accs.append(acc)
             fold_f1s.append(f1)
@@ -1435,3 +1587,278 @@ def analyze_feature_importance(self, regime: str = None):
     except Exception as e:
         logger.error(f"Feature importance analysis failed: {e}", exc_info=True)
         return {'status': 'error', 'message': str(e)}
+
+
+@celery_app.task(name="app.tasks.training.analyze_features_shap", bind=True, max_retries=1)
+@notify_on_failure("analyze_features_shap")
+def analyze_features_shap(self, sample_size: int = 500):
+    """SHAP 기반 Feature Importance 분석 태스크.
+
+    Phase M.2: 학습된 모델을 로드하고 실제 데이터에 대해 SHAP 분석을 수행합니다.
+    결과는 model_artifacts/ 디렉토리에 JSON + 텍스트 리포트로 저장됩니다.
+
+    Args:
+        sample_size: SHAP 분석에 사용할 최대 샘플 수 (기본: 500).
+    """
+    logger.info("SHAP Feature Importance 분석 시작 (sample_size=%d)...", sample_size)
+
+    session = SessionLocal()
+    try:
+        from app.ml.shap_analyzer import SHAPFeatureSelector
+
+        repo = SyncStockRepository(session)
+        feature_engineer = FeatureEngineer()
+
+        # 1. 활성 심볼 로드
+        symbols = repo.get_active_symbols()
+        if not symbols:
+            logger.warning("활성 심볼이 없습니다")
+            return {"status": "error", "message": "No active symbols"}
+
+        # 2. 데이터 로드 (레짐 분류 포함)
+        end_date = pd.Timestamp.now(tz='UTC')
+        start_date = end_date - timedelta(days=LOOKBACK_YEARS * 365)
+
+        X, y, successful_symbols = _load_and_prepare_data(
+            repo, feature_engineer, symbols, start_date, end_date,
+            symbol_limit=None, classify_regime=True,
+        )
+
+        if X.empty:
+            logger.error("SHAP 분석용 데이터를 수집하지 못했습니다")
+            return {"status": "error", "message": "No data available"}
+
+        # 3. 레짐별 데이터 분리
+        feature_names = feature_engineer.base_feature_columns
+        X_data: dict[str, pd.DataFrame] = {}
+        y_data: dict[str, pd.Series] = {}
+
+        for regime in MarketRegime:
+            regime_mask = X['regime'] == regime.value
+            X_regime = X[regime_mask].drop(columns=['regime'])
+            y_regime = y[regime_mask]
+
+            if len(X_regime) >= 100:
+                # feature 추출 (스케일링)
+                X_scaled = feature_engineer.extract_feature_vector(
+                    X_regime, fit_scaler=False,
+                    feature_set="base", scaler_suffix=regime.value,
+                )
+                if not X_scaled.empty:
+                    X_data[regime.value] = X_scaled
+                    y_data[regime.value] = y_regime.loc[X_scaled.index]
+            else:
+                logger.warning(
+                    "레짐 '%s' 데이터 부족 (%d < 100) — SHAP 분석 건너뜀",
+                    regime.value, len(X_regime),
+                )
+
+        if not X_data:
+            logger.error("SHAP 분석 가능한 레짐이 없습니다")
+            return {"status": "error", "message": "No regime data available"}
+
+        # 4. SHAP 분석 실행
+        selector = SHAPFeatureSelector(
+            model_artifacts_path=MODEL_SAVE_PATH,
+            shap_sample_size=sample_size,
+        )
+        results = selector.analyze_all_regimes(
+            feature_names=feature_names,
+            X_data=X_data,
+            y_data=y_data,
+        )
+
+        if not results:
+            logger.warning("SHAP 분석 결과 없음 — 모델 파일을 확인하세요")
+            return {"status": "error", "message": "No SHAP results"}
+
+        # 5. 리포트 저장
+        report_path = selector.save_report(results, output_dir=MODEL_SAVE_PATH)
+
+        # 6. 요약 로깅
+        for regime, result in results.items():
+            top5 = sorted(
+                result.global_importance.items(),
+                key=lambda x: x[1], reverse=True,
+            )[:5]
+            removal = selector.get_removal_candidates(result)
+            logger.info(
+                "SHAP %s: top-5=%s, 제거후보=%s",
+                regime, [f[0] for f in top5], removal,
+            )
+
+        logger.info("SHAP 분석 완료: %d개 레짐, 리포트=%s", len(results), report_path)
+
+        return {
+            "status": "success",
+            "regimes_analyzed": list(results.keys()),
+            "report_path": report_path,
+        }
+
+    except ImportError:
+        logger.error("shap 패키지 미설치 — pip install shap>=0.46.0")
+        return {"status": "error", "message": "shap package not installed"}
+    except Exception as e:
+        logger.error("SHAP 분석 실패: %s", str(e), exc_info=True)
+        return {"status": "error", "message": str(e)}
+    finally:
+        session.close()
+
+
+@celery_app.task(
+    name="app.tasks.training.optimize_thresholds",
+    bind=True,
+    max_retries=1,
+)
+@notify_on_failure("optimize_thresholds")
+def optimize_thresholds(self) -> dict:
+    """Adaptive threshold optimization task (Phase M.3).
+
+    Runs Optuna-based optimization for classification threshold (θ) and
+    confidence threshold per regime.  Results are saved to
+    ``model_artifacts/adaptive_thresholds.json``.
+
+    Returns:
+        Status dict with regime-level optimized thresholds.
+    """
+    from app.ml.threshold_optimizer import AdaptiveThresholdOptimizer
+
+    logger.info("적응형 임계값 최적화 시작...")
+
+    session = SessionLocal()
+    try:
+        repo = SyncStockRepository(session)
+        feature_engineer = FeatureEngineer()
+
+        symbols = repo.get_active_symbols()
+        if not symbols:
+            logger.warning("활성 종목 없음")
+            return {"status": "error", "message": "No active symbols"}
+
+        end_date = pd.Timestamp.now(tz='UTC')
+        start_date = end_date - timedelta(days=LOOKBACK_YEARS * 365)
+
+        # 1. Load and prepare data
+        X, y, successful_symbols = _load_and_prepare_data(
+            repo, feature_engineer, symbols, start_date, end_date,
+        )
+
+        if X.empty:
+            logger.warning("데이터 없음")
+            return {"status": "error", "message": "No data loaded"}
+
+        # 2. Split by regime
+        data_by_regime: dict[str, tuple[pd.DataFrame, np.ndarray, np.ndarray]] = {}
+        models_by_regime: dict = {}
+
+        regime_col = X['regime'] if 'regime' in X.columns else None
+        if regime_col is None:
+            logger.warning("regime 컬럼 없음 — 전체 데이터를 sideways_calm으로 처리")
+            regime_col = pd.Series('sideways_calm', index=X.index)
+
+        for regime_value in regime_col.unique():
+            mask = regime_col == regime_value
+            X_regime = X[mask].copy()
+            y_regime = y[mask].copy()
+
+            if len(X_regime) < 100:
+                logger.warning(
+                    "%s: 데이터 부족 (%d < 100), 건너뜀", regime_value, len(X_regime),
+                )
+                continue
+
+            # Scale features
+            market_avg_volume = (
+                X_regime['volume'].mean() if 'volume' in X_regime.columns else None
+            )
+            X_scaled = feature_engineer.extract_feature_vector(
+                X_regime, fit_scaler=True,
+                market_avg_volume=market_avg_volume,
+                feature_set="base", scaler_suffix=regime_value,
+            )
+
+            # Compute raw returns for θ optimization
+            if 'close' in X_regime.columns:
+                raw_returns = X_regime['close'].pct_change().dropna().values
+                n_ret = len(raw_returns)
+                n_feat = len(X_scaled)
+                min_len = min(n_ret, n_feat)
+                raw_returns = raw_returns[-min_len:]
+                X_scaled = X_scaled.iloc[-min_len:]
+                y_regime_arr = y_regime.values[-min_len:]
+
+                data_by_regime[regime_value] = (X_scaled, y_regime_arr, raw_returns)
+            else:
+                logger.warning("%s: close 컬럼 없음, 건너뜀", regime_value)
+                continue
+
+            # Load production model for confidence optimization
+            import joblib as _jl  # noqa: F811
+
+            model_path = os.path.join(
+                MODEL_SAVE_PATH, f"ensemble_classifier_{regime_value}.pkl",
+            )
+            if os.path.exists(model_path):
+                try:
+                    from app.ml.models import EnsembleClassifierWrapper
+
+                    loaded_clf = _jl.load(model_path)
+                    shim = EnsembleClassifierWrapper.__new__(EnsembleClassifierWrapper)
+                    shim.model = loaded_clf
+                    shim.weights = None
+                    shim.metadata = {}
+                    models_by_regime[regime_value] = shim
+                except Exception as e:
+                    logger.debug("모델 로드 실패 (%s): %s", regime_value, e)
+
+        if not data_by_regime:
+            logger.warning("최적화 가능한 regime 데이터 없음")
+            return {"status": "error", "message": "No regime data"}
+
+        # 3. Run optimization
+        optimizer = AdaptiveThresholdOptimizer(output_dir=MODEL_SAVE_PATH)
+        results = optimizer.optimize_all_regimes(
+            data_by_regime=data_by_regime,
+            models_by_regime=models_by_regime,
+            class_weights_by_regime=REGIME_CLASS_WEIGHTS,
+        )
+
+        if not results:
+            return {"status": "error", "message": "No optimization results"}
+
+        # 4. Save and log results
+        out_path = optimizer.save_thresholds(results)
+
+        summary: dict[str, dict] = {}
+        for regime, res in results.items():
+            summary[regime] = {
+                "theta": round(res.optimal_theta, 5),
+                "confidence": round(res.optimal_confidence, 3),
+                "theta_score": round(res.theta_composite_score, 4),
+                "conf_score": round(res.confidence_trade_score, 4),
+            }
+            logger.info(
+                "  %s: θ=%.5f (기본 %.5f), confidence=%.3f, "
+                "θ_score=%.4f, conf_score=%.4f",
+                regime, res.optimal_theta, CLASSIFICATION_THRESHOLD,
+                res.optimal_confidence, res.theta_composite_score,
+                res.confidence_trade_score,
+            )
+
+        logger.info(
+            "적응형 임계값 최적화 완료: %d개 레짐, 저장=%s",
+            len(results), out_path,
+        )
+
+        return {
+            "status": "success",
+            "regimes_optimized": list(results.keys()),
+            "thresholds": summary,
+            "output_path": str(out_path),
+        }
+
+    except Exception as e:
+        logger.error("적응형 임계값 최적화 실패: %s", str(e), exc_info=True)
+        return {"status": "error", "message": str(e)}
+    finally:
+        session.close()

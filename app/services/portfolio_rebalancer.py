@@ -35,64 +35,65 @@ class PortfolioRebalancer:
         self.min_rebalance_threshold = 0.05  # 5% drift
         self.max_position_weight = 0.30  # 30% max per symbol
 
-    async def rebalance(self, symbols: list[str], force: bool = False):
-        """
-        Rebalance portfolio to optimal weights.
-        
+    def rebalance(self, symbols: list[str], force: bool = False) -> None:
+        """Rebalance portfolio to optimal weights.
+
         Process:
-        1. Get current positions and portfolio value
-        2. Calculate optimal weights (MPT)
-        3. Check if rebalancing needed (drift > 5%)
-        4. Execute buy/sell orders to reach target weights
-        
+            1. Get current positions and portfolio value
+            2. Calculate optimal weights (MPT)
+            3. Check if rebalancing needed (drift > 5%)
+            4. Execute buy/sell orders to reach target weights
+
         Args:
-            symbols: List of symbols to include in portfolio
-            force: If True, rebalance regardless of drift
+            symbols: List of symbols to include in portfolio.
+            force: If True, rebalance regardless of drift.
         """
         try:
-            logger.info(f"{len(symbols)}개 심볼에 대해 포트폴리오 리밸런싱 시작")
+            logger.info("%d개 심볼에 대해 포트폴리오 리밸런싱 시작", len(symbols))
 
             # 1. Get current portfolio state
             account = self.api.get_account()
             portfolio_value = float(account.portfolio_value)
-            current_positions = await self._get_current_positions()
+            current_positions = self._get_current_positions()
 
-            logger.info(f"포트폴리오 가치: ${portfolio_value:,.2f}")
-            logger.info(f"현재 포지션: {current_positions}")
+            logger.info("포트폴리오 가치: $%,.2f", portfolio_value)
+            logger.info("현재 포지션: %s", current_positions)
 
             # 2. Calculate target weights (MPT optimization)
-            target_weights = await self.optimizer.optimize_weights(self.repo, symbols)
+            target_weights = self.optimizer.optimize_weights(self.repo, symbols)
 
-            logger.info(f"목표 가중치: {target_weights}")
+            logger.info("목표 가중치: %s", target_weights)
 
             # 3. Check if rebalancing needed
             current_weights = self._calculate_current_weights(current_positions, portfolio_value)
             max_drift = self._calculate_max_drift(current_weights, target_weights)
 
-            logger.info(f"최대 가중치 드리프트: {max_drift:.2%}")
+            logger.info("최대 가중치 드리프트: %.2f%%", max_drift * 100)
 
             if not force and max_drift < self.min_rebalance_threshold:
-                logger.info(f"리밸런싱 불필요 (드리프트 {max_drift:.2%} < {self.min_rebalance_threshold:.2%})")
+                logger.info(
+                    "리밸런싱 불필요 (드리프트 %.2f%% < %.2f%%)",
+                    max_drift * 100, self.min_rebalance_threshold * 100,
+                )
                 return
 
             # 4. Execute rebalancing orders
-            await self._execute_rebalancing(symbols, target_weights, portfolio_value, current_positions)
+            self._execute_rebalancing(symbols, target_weights, portfolio_value, current_positions)
 
             logger.info("포트폴리오 리밸런싱 완료")
 
         except Exception as e:
-            logger.error(f"리밸런싱 실패: {e}", exc_info=True)
+            logger.error("리밸런싱 실패: %s", e, exc_info=True)
 
-    async def _get_current_positions(self) -> dict[str, dict]:
-        """
-        Get current positions from Alpaca API.
-        
+    def _get_current_positions(self) -> dict[str, dict]:
+        """Get current positions from Alpaca API.
+
         Returns:
-            Dict of {symbol: {'qty': int, 'market_value': float}}
+            Dict of ``{symbol: {'qty': int, 'market_value': float, 'avg_entry_price': float}}``.
         """
         try:
             positions = self.api.get_all_positions()
-            current = {}
+            current: dict[str, dict] = {}
 
             for pos in positions:
                 current[pos.symbol] = {
@@ -104,7 +105,7 @@ class PortfolioRebalancer:
             return current
 
         except Exception as e:
-            logger.error(f"현재 포지션 조회 실패: {e}", exc_info=True)
+            logger.error("현재 포지션 조회 실패: %s", e, exc_info=True)
             return {}
 
     def _calculate_current_weights(
@@ -113,6 +114,9 @@ class PortfolioRebalancer:
         portfolio_value: float
     ) -> dict[str, float]:
         """Calculate current portfolio weights."""
+        if portfolio_value <= 0:
+            return {}
+
         weights = {}
 
         for symbol, pos_info in positions.items():
@@ -137,99 +141,77 @@ class PortfolioRebalancer:
 
         return max_drift
 
-    async def _execute_rebalancing(
+    def _execute_rebalancing(
         self,
         symbols: list[str],
         target_weights: dict[str, float],
         portfolio_value: float,
-        current_positions: dict[str, dict]
-    ):
-        """
-        Execute buy/sell orders to reach target weights.
-        
+        current_positions: dict[str, dict],
+    ) -> None:
+        """Execute buy/sell orders to reach target weights.
+
         Strategy:
-        - Sell positions that need reduction first (free up capital)
-        - Buy positions that need increase
-        - Only rebalance if difference > $100 (avoid micro-trades)
+            - Sell positions that need reduction first (free up capital)
+            - Buy positions that need increase
+            - Only rebalance if difference > $100 (avoid micro-trades)
         """
         min_trade_value = 100  # Minimum $100 per trade
 
         for symbol in symbols:
             try:
-                # Target value for this symbol
                 target_value = portfolio_value * target_weights.get(symbol, 0.0)
-
-                # Current value
                 current_value = current_positions.get(symbol, {}).get('market_value', 0.0)
-
-                # Difference
                 diff_value = target_value - current_value
 
-                logger.info(f"{symbol}: 현재 ${current_value:.0f} → 목표 ${target_value:.0f} (차이: ${diff_value:+.0f})")
+                logger.info(
+                    "%s: 현재 $%.0f → 목표 $%.0f (차이: $%+.0f)",
+                    symbol, current_value, target_value, diff_value,
+                )
 
-                # Skip if difference is too small
                 if abs(diff_value) < min_trade_value:
-                    logger.info(f"  {symbol} 건너뜀 (차이 < ${min_trade_value})")
+                    logger.info("  %s 건너뜀 (차이 < $%d)", symbol, min_trade_value)
                     continue
 
-                # Get current price from existing position or use market price
                 if symbol in current_positions:
-                    # Use average entry price as estimate for current price
                     current_price = current_positions[symbol].get('avg_entry_price', 0.0)
                     if current_price <= 0:
-                        logger.warning(f"  잘못된 가격 데이터 {symbol}")
+                        logger.warning("  잘못된 가격 데이터 %s", symbol)
                         continue
                 else:
-                    # For new positions, we need to get price from DB or skip
-                    # This should be handled by data provider in production
-                    logger.warning(f"  신규 심볼 {symbol}에 대한 가격 데이터 없음 — 건너뜀")
+                    logger.warning("  신규 심볼 %s에 대한 가격 데이터 없음 — 건너뜀", symbol)
                     continue
 
-                # Calculate quantity
                 qty = int(abs(diff_value) / current_price)
-
                 if qty == 0:
-                    logger.info(f"  {symbol}: 주문 수량 부족")
+                    logger.info("  %s: 주문 수량 부족", symbol)
                     continue
 
-                # Execute order
-                if diff_value > 0:
-                    # BUY
-                    logger.info(f"  BUY {symbol} {qty}주 @ ${current_price:.2f}")
-                    order_data = MarketOrderRequest(
-                        symbol=symbol,
-                        qty=qty,
-                        side=OrderSide.BUY,
-                        time_in_force=TimeInForce.DAY
-                    )
-                    order = self.api.submit_order(order_data=order_data)
-                    logger.info(f"  주문 접수: {order.id}")
-                else:
-                    # SELL
-                    logger.info(f"  SELL {symbol} {qty}주 @ ${current_price:.2f}")
-                    order_data = MarketOrderRequest(
-                        symbol=symbol,
-                        qty=qty,
-                        side=OrderSide.SELL,
-                        time_in_force=TimeInForce.DAY
-                    )
-                    order = self.api.submit_order(order_data=order_data)
-                    logger.info(f"  주문 접수: {order.id}")
+                side = OrderSide.BUY if diff_value > 0 else OrderSide.SELL
+                logger.info(
+                    "  %s %s %d주 @ $%.2f", side.name, symbol, qty, current_price,
+                )
+                order_data = MarketOrderRequest(
+                    symbol=symbol,
+                    qty=qty,
+                    side=side,
+                    time_in_force=TimeInForce.DAY,
+                )
+                order = self.api.submit_order(order_data=order_data)
+                logger.info("  주문 접수: %s", order.id)
 
             except Exception as e:
-                logger.error(f"  리밸런싱 실패 {symbol}: {e}")
+                logger.error("  리밸런싱 실패 %s: %s", symbol, e)
                 continue
 
-    async def calculate_target_weights(self, symbols: list[str]) -> dict[str, float]:
-        """
-        Calculate target weights (wrapper for optimizer).
-        
+    def calculate_target_weights(self, symbols: list[str]) -> dict[str, float]:
+        """Calculate target weights (wrapper for optimizer).
+
         Useful for API endpoints that want to preview weights without executing.
-        
+
         Args:
-            symbols: List of symbols
-        
+            symbols: List of symbols.
+
         Returns:
-            Dict of {symbol: weight}
+            Dict of ``{symbol: weight}``.
         """
-        return await self.optimizer.optimize_weights(self.repo, symbols)
+        return self.optimizer.optimize_weights(self.repo, symbols)

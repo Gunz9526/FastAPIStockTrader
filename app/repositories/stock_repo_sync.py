@@ -178,3 +178,51 @@ class SyncStockRepository:
             self.db.flush()
 
         return position
+
+    def get_all_active_positions(self) -> list[PositionTracking]:
+        """Get all active positions (exit_time IS NULL).
+
+        Returns:
+            List of PositionTracking records where exit_time is NULL.
+        """
+        result = self.db.execute(
+            select(PositionTracking)
+            .where(PositionTracking.exit_time.is_(None))
+            .order_by(PositionTracking.entry_time.desc())
+        )
+        return list(result.scalars().all())
+
+    def update_position_stops(
+        self,
+        position_id: int,
+        trailing_stop_price: float | None = None,
+        stop_loss_price: float | None = None,
+        take_profit_price: float | None = None,
+    ) -> None:
+        """Update stop prices on a PositionTracking record.
+
+        Only updates fields that are explicitly provided (not None).
+
+        Args:
+            position_id: PositionTracking ID.
+            trailing_stop_price: New trailing stop price.
+            stop_loss_price: New stop loss price.
+            take_profit_price: New take profit price.
+        """
+        result = self.db.execute(
+            select(PositionTracking)
+            .where(PositionTracking.id == position_id)
+        )
+        position = result.scalar_one_or_none()
+
+        if position is None:
+            return
+
+        if trailing_stop_price is not None:
+            position.trailing_stop_price = float(trailing_stop_price)
+        if stop_loss_price is not None:
+            position.stop_loss_price = float(stop_loss_price)
+        if take_profit_price is not None:
+            position.take_profit_price = float(take_profit_price)
+
+        self.db.flush()

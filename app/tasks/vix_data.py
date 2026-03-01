@@ -137,7 +137,7 @@ def collect_vix_data(self, days: int = 7):
         raise self.retry(exc=e, countdown=300)  # 5분 후 재시도
 
 
-def get_latest_vix() -> float:
+def get_latest_vix() -> float | None:
     """
     Redis 캐시에서 최신 VIX 값을 가져옵니다.
 

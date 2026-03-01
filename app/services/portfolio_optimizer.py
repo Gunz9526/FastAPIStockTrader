@@ -68,6 +68,7 @@ class PortfolioOptimizer:
                 use_live = live_trade_count >= self.min_live_trades
             else:
                 use_live = False
+                live_trade_count = 0
 
             if use_live:
                 logger.info(f"실거래 데이터 사용 ({live_trade_count} 건)")
@@ -87,6 +88,7 @@ class PortfolioOptimizer:
             if isinstance(next(iter(non_empty.values())), pd.Series):
                 # Date-indexed Series: align on shared dates
                 df_returns = pd.concat(non_empty, axis=1).dropna()
+                n_samples = len(df_returns)
             else:
                 # Numpy arrays (live trades): align by shortest length
                 min_length = min(len(v) for v in non_empty.values())
@@ -94,6 +96,7 @@ class PortfolioOptimizer:
                     return pd.DataFrame(np.eye(len(symbols)), index=symbols, columns=symbols)
                 aligned = {k: v[:min_length] for k, v in non_empty.items()}
                 df_returns = pd.DataFrame(aligned)
+                n_samples = min_length
 
             if df_returns.empty or len(df_returns) < 2:
                 logger.warning("정렬 후 데이터 부족 — 단위 행렬을 사용합니다")
@@ -104,7 +107,7 @@ class PortfolioOptimizer:
             # Cache for 24 hours
             cache.set(cache_key, corr_matrix.to_json(), ttl_seconds=self.cache_ttl)
 
-            logger.info(f"상관 행렬 계산 완료 ({min_length} 샘플):\n{corr_matrix}")
+            logger.info(f"상관 행렬 계산 완료 ({n_samples} 샘플):\n{corr_matrix}")
             return corr_matrix
 
         except Exception as e:
@@ -391,12 +394,19 @@ class PortfolioOptimizer:
             # Get correlation matrix and returns
             corr_matrix = self.calculate_correlation_matrix(repo, symbols)
 
+            # Filter to symbols present in correlation matrix
+            valid_symbols = [s for s in symbols if s in corr_matrix.columns]
+            if len(valid_symbols) < 2:
+                logger.warning("유효 심볼 부족 (%d개) — 균등 가중치 사용", len(valid_symbols))
+                return {s: 1.0 / len(symbols) for s in symbols}
+            corr_matrix = corr_matrix.loc[valid_symbols, valid_symbols]
+
             # Mean returns (simplified: use backtest data)
             end_date = datetime.now()
             start_date = end_date - timedelta(days=self.lookback_days)
 
             mean_returns = {}
-            for symbol in symbols:
+            for symbol in valid_symbols:
                 ohlcv = repo.get_ohlcv_range(symbol, start_date, end_date, timeframe='1d')
                 if len(ohlcv) > 0:
                     df = pd.DataFrame([{'close': bar.close} for bar in ohlcv])
@@ -405,16 +415,31 @@ class PortfolioOptimizer:
                 else:
                     mean_returns[symbol] = 0.0
 
+            # Compute per-symbol std for covariance conversion
+            std_returns_list: list[float] = []
+            for symbol in valid_symbols:
+                ohlcv = repo.get_ohlcv_range(symbol, start_date, end_date, timeframe='1d')
+                if len(ohlcv) > 1:
+                    df_std = pd.DataFrame([{'close': bar.close} for bar in ohlcv])
+                    rets = df_std['close'].pct_change().dropna()
+                    std_returns_list.append(rets.std())
+                else:
+                    std_returns_list.append(0.01)  # fallback small std
+
+            std_arr = np.array(std_returns_list)
+            cov_matrix = corr_matrix * np.outer(std_arr, std_arr)
+
             # Optimization setup
-            n_assets = len(symbols)
+            n_assets = len(valid_symbols)
             init_weights = np.array([1.0 / n_assets] * n_assets)
 
-            def neg_sharpe(weights):
+            def neg_sharpe(weights: np.ndarray) -> float:
                 """Negative Sharpe ratio (for minimization)."""
-                portfolio_return = np.dot(weights, [mean_returns[s] for s in symbols])
-                portfolio_std = np.sqrt(np.dot(weights.T, np.dot(corr_matrix, weights)))
-                sharpe = portfolio_return / portfolio_std if portfolio_std > 0 else 0
-                return -sharpe
+                portfolio_return = np.dot(weights, [mean_returns[s] for s in valid_symbols])
+                portfolio_std = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
+                if portfolio_std <= 0:
+                    return float('inf')
+                return -(portfolio_return / portfolio_std)
 
             # Constraints
             constraints = [
@@ -434,14 +459,18 @@ class PortfolioOptimizer:
             )
 
             if result.success:
-                weights_dict = {symbols[i]: result.x[i] for i in range(n_assets)}
-                logger.info(f"MPT 최적화 가중치: {weights_dict}")
+                # Build result — excluded symbols get weight 0.0
+                weights_dict = {s: float(w) for s, w in zip(valid_symbols, result.x)}
+                for s in symbols:
+                    if s not in weights_dict:
+                        weights_dict[s] = 0.0
+                logger.info("MPT 최적화 가중치: %s", weights_dict)
                 return weights_dict
             else:
                 logger.warning("MPT 최적화 실패 — 균등 가중치 사용")
-                return {s: 1.0 / n_assets for s in symbols}
+                return {s: 1.0 / len(symbols) for s in symbols}
 
         except Exception as e:
-            logger.error(f"가중치 최적화 실패: {e}", exc_info=True)
+            logger.error("가중치 최적화 실패: %s", e, exc_info=True)
             # Fallback: equal weights
             return {s: 1.0 / len(symbols) for s in symbols}

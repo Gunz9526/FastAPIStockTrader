@@ -12,6 +12,14 @@ logger = logging.getLogger(__name__)
 # Resolve model artifacts path: env var > relative default
 _MODEL_ARTIFACTS_PATH: str = os.getenv("MODEL_SAVE_PATH", "model_artifacts")
 
+# Fallback chain: when a regime model is unavailable, try these in order
+_REGIME_FALLBACK_CHAIN: dict["MarketRegime", list["MarketRegime"]] = {
+    MarketRegime.BULL_TRENDING: [MarketRegime.SIDEWAYS_CALM, MarketRegime.BEAR_TRENDING],
+    MarketRegime.BEAR_TRENDING: [MarketRegime.SIDEWAYS_CALM, MarketRegime.BULL_TRENDING],
+    MarketRegime.SIDEWAYS_VOLATILE: [MarketRegime.SIDEWAYS_CALM, MarketRegime.BULL_TRENDING, MarketRegime.BEAR_TRENDING],
+    MarketRegime.SIDEWAYS_CALM: [MarketRegime.BULL_TRENDING, MarketRegime.BEAR_TRENDING, MarketRegime.SIDEWAYS_VOLATILE],
+}
+
 
 class PredictorService:
     """Regime-aware predictor service using ensemble classifier models.
@@ -182,8 +190,22 @@ class PredictorService:
             model = self._models.get(regime)
 
         if model is None:
-            logger.warning("No model for regime %s, returning neutral", regime.value)
-            return neutral
+            # Try fallback chain before returning neutral
+            fallback_chain = _REGIME_FALLBACK_CHAIN.get(regime, [])
+            for fallback_regime in fallback_chain:
+                with self._lock:
+                    model = self._models.get(fallback_regime)
+                if model is not None:
+                    logger.warning(
+                        "No model for %s, falling back to %s",
+                        regime.value,
+                        fallback_regime.value,
+                    )
+                    break
+
+            if model is None:
+                logger.warning("No model for regime %s (no fallback available), returning neutral", regime.value)
+                return neutral
 
         try:
             # Check if model supports classification
@@ -257,8 +279,22 @@ class PredictorService:
             model = self._models.get(regime)
 
         if model is None:
-            logger.warning("No model for regime %s, returning neutral", regime.value)
-            return 0.5
+            # Try fallback chain before returning neutral
+            fallback_chain = _REGIME_FALLBACK_CHAIN.get(regime, [])
+            for fallback_regime in fallback_chain:
+                with self._lock:
+                    model = self._models.get(fallback_regime)
+                if model is not None:
+                    logger.warning(
+                        "No model for %s, falling back to %s",
+                        regime.value,
+                        fallback_regime.value,
+                    )
+                    break
+
+            if model is None:
+                logger.warning("No model for regime %s (no fallback available), returning neutral", regime.value)
+                return 0.5
 
         try:
             # Ensure DataFrame format with column names (XGBoost requirement)

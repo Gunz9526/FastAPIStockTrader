@@ -1,4 +1,5 @@
 import logging
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, BackgroundTasks
 from pydantic import BaseModel
@@ -40,7 +41,7 @@ async def trigger_training(background_tasks: BackgroundTasks):
     
     전체 프로세스:
         1. Regime 분류 (SPY 데이터 기반)
-        2. 피처 엔지니어링 (20개 base features)
+        2. 피처 엔지니어링 (26개 base features)
         3. CatBoost + LGBM + XGBoost 앙상블 학습
     
     Returns:
@@ -135,7 +136,7 @@ async def get_system_status():
             "celery_worker": "active",
             "celery_beat": "active"
         },
-        "timestamp": "2025-12-29T06:00:00Z"
+        "timestamp": datetime.now(UTC).isoformat()
     }
 
 

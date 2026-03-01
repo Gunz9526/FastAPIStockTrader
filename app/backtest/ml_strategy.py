@@ -1,9 +1,9 @@
 import logging
-from typing import Optional
 
 import backtrader as bt
 import pandas as pd
 
+from app.core.config import REGIME_TRADING_CONFIG
 from app.ml.features import FeatureEngineer
 from app.ml.models import CLASS_NAMES
 from app.ml.predictor import PredictorService
@@ -11,29 +11,14 @@ from app.services.regime import MarketRegime, RegimeDetector
 
 logger = logging.getLogger(__name__)
 
-# Regime-specific classification config (mirrors core/config.py REGIME_TRADING_CONFIG).
-# Local copy avoids circular import at module level.
+# Build backtest-specific config from the canonical source
 BACKTEST_REGIME_CONFIG: dict[str, dict] = {
-    "bull_trending": {
-        "confidence_threshold": 0.45,
-        "min_hold_days": 2,
-        "position_scale": 0.5,
-    },
-    "bear_trending": {
-        "confidence_threshold": 0.55,
-        "min_hold_days": 1,
-        "position_scale": 0.5,
-    },
-    "sideways_volatile": {
-        "confidence_threshold": 0.60,
-        "min_hold_days": 1,
-        "position_scale": 0.3,
-    },
-    "sideways_calm": {
-        "confidence_threshold": 0.40,
-        "min_hold_days": 2,
-        "position_scale": 1.0,
-    },
+    regime: {
+        "confidence_threshold": cfg["confidence_threshold"],
+        "min_hold_days": cfg.get("min_hold_days", 1),
+        "position_scale": cfg.get("position_scale", 1.0),
+    }
+    for regime, cfg in REGIME_TRADING_CONFIG.items()
 }
 
 _DEFAULT_REGIME_CONFIG: dict = {
@@ -74,15 +59,16 @@ class MLStrategy(bt.Strategy):
         self.feature_engineer = FeatureEngineer()
         self.regime_detector = RegimeDetector()
         self.dataclose = self.datas[0].close
-        self.order: Optional[bt.Order] = None
-        self.buyprice: Optional[float] = None
-        self.buycomm: Optional[float] = None
+        self.order: bt.Order | None = None
+        self.buyprice: float | None = None
+        self.buycomm: float | None = None
 
         # Classification history: list of (class, confidence, probabilities)
         self.predictions: list[tuple[int, float, dict[str, float]]] = []
 
         # Minimum-hold tracking (bar index of entry)
         self.entry_bar: int = 0
+        self.bar_executed: int = 0
 
     # ------------------------------------------------------------------
     # Helpers

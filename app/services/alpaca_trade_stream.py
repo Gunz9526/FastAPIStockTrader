@@ -58,7 +58,7 @@ class AlpacaTradeStream:
         self.stream = TradingStream(
             api_key=settings.ALPACA_API_KEY,
             secret_key=settings.ALPACA_SECRET_KEY,
-            paper=settings.ALPACA_PAPER,
+            paper="paper" in str(getattr(settings, "ALPACA_TRADING_URL", "")).lower(),
             raw_data=False  # Use parsed TradeUpdate objects
         )
 
@@ -128,16 +128,19 @@ class AlpacaTradeStream:
             repo = SyncStockRepository(db)
 
             try:
-                # Record in trade_logs table
-                repo.record_trade(
-                    symbol=order.symbol,
-                    action=order.side.name,
-                    quantity=int(order.filled_qty),
-                    price=float(order.filled_avg_price),
-                    order_id=order.id,
-                    execution_time=datetime.now()
-                )
+                if order.side.name == "buy":
+                    repo.record_position_entry(
+                        symbol=order.symbol,
+                        entry_price=float(order.filled_avg_price),
+                        quantity=int(order.filled_qty),
+                        entry_time=datetime.now(),
+                    )
+                else:
+                    active = repo.get_active_position(order.symbol)
+                    if active:
+                        repo.update_position_exit(active.id, float(order.filled_avg_price))
 
+                db.commit()
                 logger.info(f"거래가 DB에 기록됨: {order.id}")
             except Exception as e:
                 logger.error(f"거래 기록 실패 {order.id}: {e}")

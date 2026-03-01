@@ -225,17 +225,17 @@ class SentimentAnalyzer:
         Returns:
             Regime-adjusted sentiment score
         """
-        if current_regime == "BULL_TRENDING":
+        if current_regime == "bull_trending":
             if raw_score > 0:
                 adjusted = raw_score * 1.3
             else:
                 adjusted = raw_score * 0.7
-        elif current_regime == "BEAR":
+        elif current_regime == "bear_trending":
             if raw_score < 0:
                 adjusted = raw_score * 1.3
             else:
                 adjusted = raw_score * 0.7
-        else:  # SIDEWAYS_VOLATILE or SIDEWAYS_CALM
+        else:  # sideways_volatile or sideways_calm
             adjusted = raw_score
 
         # Clamp to valid range

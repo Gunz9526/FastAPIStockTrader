@@ -12,9 +12,12 @@ from app.ml.predictor import PredictorService
 from app.repositories.portfolio_repo import PortfolioRepository
 from app.repositories.stock_repo_sync import SyncStockRepository
 from app.services.discord_notifier import discord_notifier
+from app.services.momentum_scorer import CrossSectionalMomentum
 from app.services.portfolio_optimizer import PortfolioOptimizer
 from app.services.regime import MarketRegime, RegimeDetector, REGIME_STRATEGY_WEIGHTS
 from app.services.risk_manager import RiskManager
+
+from app.domain.schemas.intraday import EntrySignal, ExitSignal
 
 logger = logging.getLogger(__name__)
 
@@ -367,7 +370,7 @@ class SyncTradingStrategy:
         try:
             # 캐시에서 sentiment 가져오기 (1시간 TTL)
             if self.sentiment_analyzer:
-                sentiment_score = self.sentiment_analyzer.get_sentiment_from_cache(symbol)
+                sentiment_score = self.sentiment_analyzer.get_cached_sentiment(symbol)
                 if sentiment_score is None:
                     sentiment_score = 0.0  # 데이터 없으면 중립값
         except (AttributeError, ValueError, TypeError) as e:
@@ -666,6 +669,24 @@ class SyncTradingStrategy:
                     self.circuit_breaker.record_trade_result(order_success, realized_pnl)
 
 
+    def _get_cached_signal(self, symbol: str, regime: str):
+        """Retrieve cached daily signal from Redis (Phase L.1).
+
+        Args:
+            symbol: Stock ticker.
+            regime: Market regime string.
+
+        Returns:
+            ``CachedSignal`` if cached, ``None`` on miss or error.
+        """
+        try:
+            from app.services.signal_cache import daily_signal_cache
+
+            return daily_signal_cache.get_signal(symbol, regime)
+        except Exception:
+            logger.debug("Signal cache lookup failed for %s", symbol)
+            return None
+
     def process_portfolio(self, symbols: list[str]):
         """
         Process multiple symbols for multi-position portfolio trading (Phase I.2).
@@ -700,6 +721,11 @@ class SyncTradingStrategy:
                         status['state'], status['daily_pnl']
                     )
                     return
+
+            # 0b. 일일 거래 한도 확인
+            if not self.risk_manager.can_trade_today():
+                logger.warning("일일 거래 한도 도달 — 트레이딩 중단")
+                return
 
             # 1. 시장 레짐 감지
             self.detect_market_regime()
@@ -762,22 +788,34 @@ class SyncTradingStrategy:
                     } for bar in ohlcv])
                     df.set_index('date_time', inplace=True)
 
-                    features_df = self.feature_engineer.create_features(df)
-                    if features_df.empty:
-                        continue
-
-                    latest_features = features_df.iloc[[-1]]
-                    # Use base feature set (27 features with momentum) matching training pipeline
+                    # Check signal cache first (L.1 optimization)
                     regime_suffix = self.current_regime.value if self.current_regime else 'sideways_calm'
-                    X_norm = self.feature_engineer.extract_feature_vector(
-                        latest_features, feature_set="base",
-                        scaler_suffix=regime_suffix
-                    )
+                    cached_signal = self._get_cached_signal(symbol, regime_suffix)
 
-                    # Get classification prediction with regime awareness
-                    pred_class, pred_conf, pred_probs = self.predictor.predict_class(
-                        X_norm, regime=self.current_regime
-                    )
+                    if cached_signal is not None:
+                        pred_class = cached_signal.predicted_class
+                        pred_conf = cached_signal.confidence
+                        pred_probs = cached_signal.probabilities
+                        logger.debug(
+                            "%s: 캐시된 signal 사용 (class=%d, conf=%.2f)",
+                            symbol, pred_class, pred_conf,
+                        )
+                    else:
+                        features_df = self.feature_engineer.create_features(df)
+                        if features_df.empty:
+                            continue
+
+                        latest_features = features_df.iloc[[-1]]
+                        # Use base feature set (26 features) matching training pipeline
+                        X_norm = self.feature_engineer.extract_feature_vector(
+                            latest_features, feature_set="base",
+                            scaler_suffix=regime_suffix
+                        )
+
+                        # Get classification prediction with regime awareness
+                        pred_class, pred_conf, pred_probs = self.predictor.predict_class(
+                            X_norm, regime=self.current_regime
+                        )
 
                     # Calculate Kelly position size
                     kelly_size = self.optimizer.kelly_criterion(
@@ -845,9 +883,33 @@ class SyncTradingStrategy:
         
         Strategy:
         - Prioritize symbols with UP class prediction and high confidence
+        - Filter by momentum percentile >= 0.50 (Phase M.1)
         - Avoid symbols highly correlated with active positions (corr > 0.7)
+        - Use momentum rank as tiebreaker when confidence is similar
         - Limit to max_new_positions
         """
+        # Phase M.1: Load cached momentum scores
+        momentum_lookup: dict[str, float] = {}
+        try:
+            cached_scores = CrossSectionalMomentum.get_cached_scores()
+            momentum_lookup = {
+                s.symbol: s.universe_percentile_rank for s in cached_scores
+            }
+            if momentum_lookup:
+                logger.info(
+                    "Momentum scores loaded: %d symbols (top: %s)",
+                    len(momentum_lookup),
+                    ", ".join(
+                        s.symbol for s in sorted(
+                            cached_scores,
+                            key=lambda x: x.composite_score,
+                            reverse=True,
+                        )[:3]
+                    ),
+                )
+        except Exception:
+            logger.warning("Momentum scores unavailable — falling back to confidence only")
+
         candidates = []
 
         for symbol, data in signals.items():
@@ -856,6 +918,17 @@ class SyncTradingStrategy:
 
             # Only consider UP predictions with reasonable confidence
             if data.get('class') != 2 or data.get('confidence', 0) < 0.35:
+                continue
+
+            # Phase M.1: Skip weak momentum (bottom half of universe)
+            # Graceful degradation: if no momentum data, allow all symbols
+            mom_rank = momentum_lookup.get(symbol, 0.5)
+            if momentum_lookup and mom_rank < 0.50:
+                logger.debug(
+                    "%s skipped: momentum percentile %.2f < 0.50",
+                    symbol,
+                    mom_rank,
+                )
                 continue
 
             # Check correlation with active positions
@@ -869,11 +942,15 @@ class SyncTradingStrategy:
                 'symbol': symbol,
                 'confidence': data.get('confidence', 0),
                 'max_corr': max_corr,
-                'kelly': data['kelly']
+                'kelly': data['kelly'],
+                'momentum_rank': mom_rank,
             })
 
-        # Sort by confidence (descending)
-        candidates.sort(key=lambda x: x['confidence'], reverse=True)
+        # Sort by confidence (primary) + momentum rank (secondary tiebreaker)
+        candidates.sort(
+            key=lambda x: (x['confidence'], x['momentum_rank']),
+            reverse=True,
+        )
 
         # Filter by correlation threshold and select top N
         selected = []
@@ -924,7 +1001,11 @@ class SyncTradingStrategy:
                     side=OrderSide.BUY,
                     time_in_force=TimeInForce.DAY
                 )
-                order = self.api.submit_order(order_data=order_data)
+                if self.circuit_breaker:
+                    with self.circuit_breaker.track_api_call():
+                        order = self.api.submit_order(order_data=order_data)
+                else:
+                    order = self.api.submit_order(order_data=order_data)
 
                 logger.info("주문 실행: BUY %s (ID: %s)", symbol, order.id)
 
@@ -933,10 +1014,45 @@ class SyncTradingStrategy:
                 regime_str = self.current_regime.value if self.current_regime else None
                 self.repo.record_position_entry(symbol, current_price, qty, entry_time, regime=regime_str)
                 self.risk_manager.record_position_entry(symbol, entry_time)
+
+                # Set initial stop prices
+                db_position = self.repo.get_active_position(symbol)
+                if db_position:
+                    initial_stop_loss = current_price * 0.95  # 5% stop loss
+                    initial_trailing = current_price * 0.985  # 1.5% trailing
+                    initial_take_profit = current_price * 1.10  # 10% take profit
+                    self.repo.update_position_stops(
+                        db_position.id,
+                        trailing_stop_price=initial_trailing,
+                        stop_loss_price=initial_stop_loss,
+                        take_profit_price=initial_take_profit,
+                    )
+
                 self.session.commit()
 
-            except (ValueError, AttributeError, TypeError) as e:
-                logger.error("%s BUY 주문 실패: %s", symbol, str(e))
+                # 일일 거래 기록 (Redis 영속화)
+                self.risk_manager.record_trade(
+                    symbol, "BUY", current_price, qty,
+                )
+
+                # Discord 알림
+                try:
+                    discord_notifier.send_trade_alert(
+                        action="BUY",
+                        symbol=symbol,
+                        qty=qty,
+                        price=current_price,
+                        extra_info={
+                            "Order ID": str(order.id),
+                            "Type": "PORTFOLIO_BUY",
+                            "Regime": self.current_regime.value if self.current_regime else "N/A",
+                        },
+                    )
+                except Exception:
+                    logger.debug("Discord notification failed", exc_info=True)
+
+            except Exception as e:
+                logger.error("%s BUY 주문 실패: %s", symbol, str(e), exc_info=True)
 
     def _process_sell_signal(self, symbol: str, signal_data: dict):
         """Process SELL signal with regime-aware defense checks (classification-based)."""
@@ -1011,8 +1127,8 @@ class SyncTradingStrategy:
             logger.info("%s SELL 허용: %s (손익: %.2f%%)", symbol, sell_reason, pnl_pct * 100)
             self._execute_sell_order(symbol, active_position, current_price, sell_reason)
 
-        except (ValueError, AttributeError, TypeError) as e:
-            logger.error("%s SELL 주문 실패: %s", symbol, str(e))
+        except Exception as e:
+            logger.error("%s SELL 주문 실패: %s", symbol, str(e), exc_info=True)
 
     def _execute_sell_order(self, symbol: str, position, current_price: float, reason: str):
         """Execute SELL order (extracted for reuse).
@@ -1042,7 +1158,11 @@ class SyncTradingStrategy:
                     side=OrderSide.SELL,
                     time_in_force=TimeInForce.DAY
                 )
-                order = self.api.submit_order(order_data=order_data)
+                if self.circuit_breaker:
+                    with self.circuit_breaker.track_api_call():
+                        order = self.api.submit_order(order_data=order_data)
+                else:
+                    order = self.api.submit_order(order_data=order_data)
 
                 logger.info("주문 실행: SELL %s x%d @ $%.2f (ID: %s, 이유: %s)",
                            symbol, qty, current_price, order.id, reason)
@@ -1052,6 +1172,30 @@ class SyncTradingStrategy:
                     self.repo.update_position_exit(locked_pos.id, current_price)
                     self.risk_manager.record_position_exit(symbol)
                     self.session.commit()
+
+                    # 일일 거래 기록 (Redis 영속화)
+                    realized_pnl = (current_price - locked_pos.entry_price) * qty
+                    self.risk_manager.record_trade(
+                        symbol, "SELL", current_price, qty,
+                        realized_pl=realized_pnl,
+                    )
+
+                    # Discord 알림
+                    try:
+                        discord_notifier.send_trade_alert(
+                            action="SELL",
+                            symbol=symbol,
+                            qty=qty,
+                            price=current_price,
+                            extra_info={
+                                "Order ID": str(order.id),
+                                "Type": "PORTFOLIO_SELL",
+                                "Reason": reason,
+                            },
+                        )
+                    except Exception:
+                        logger.debug("Discord notification failed", exc_info=True)
+
                 except Exception as db_err:
                     logger.critical(
                         "CRITICAL: Alpaca SELL 주문 성공했으나 DB 업데이트 실패! "
@@ -1064,3 +1208,320 @@ class SyncTradingStrategy:
             except Exception as e:
                 logger.error("%s SELL 주문 실행 실패: %s", symbol, str(e))
                 raise
+
+    # ------------------------------------------------------------------
+    # Phase L.2c: Intraday Execution Integration
+    # ------------------------------------------------------------------
+
+    def process_intraday_cycle(self, symbols: list[str]) -> dict:
+        """Process one 15-min intraday entry/exit cycle (Phase L.2c).
+
+        Orchestrates:
+            1. Create ``DualTimeframeOrchestrator``
+            2. Get Alpaca active positions
+            3. EXIT phase — ``check_exit`` for each held position
+            4. ENTRY phase — ``scan_entries`` for non-held symbols
+            5. Execute trades via ``_process_intraday_entry`` / ``_process_intraday_exit``
+
+        Args:
+            symbols: All active symbols to scan.
+
+        Returns:
+            Summary dict with keys: status, entries, exits, skipped, errors.
+        """
+        # Feature flag gate
+        if not settings.DUAL_TIMEFRAME_ENABLED:
+            return {
+                "status": "disabled",
+                "entries": 0,
+                "exits": 0,
+                "skipped": 0,
+                "errors": 0,
+            }
+
+        entry_count = 0
+        exit_count = 0
+        error_count = 0
+        skipped_count = 0
+
+        try:
+            # Lazy import to avoid circular dependency
+            from app.services.dual_timeframe import DualTimeframeOrchestrator
+
+            orchestrator = DualTimeframeOrchestrator(self.session)
+
+            # Refresh market regime
+            self.detect_market_regime()
+            regime_str = self.current_regime.value if self.current_regime else "sideways_calm"
+
+            # Get Alpaca positions (source of truth)
+            try:
+                alpaca_positions = self.api.get_all_positions()
+            except Exception as e:
+                logger.error("INTRADAY_CYCLE: Alpaca 포지션 조회 실패: %s", e)
+                return {"status": "error", "entries": 0, "exits": 0, "skipped": 0, "errors": 1}
+
+            active_symbols = {pos.symbol for pos in alpaca_positions}
+
+            # Get account value for position sizing
+            try:
+                account = self.api.get_account()
+                portfolio_value = float(account.portfolio_value)
+            except Exception as e:
+                logger.error("INTRADAY_CYCLE: Alpaca 계좌 조회 실패: %s", e)
+                return {"status": "error", "entries": 0, "exits": 0, "skipped": 0, "errors": 1}
+
+            # ── EXIT PHASE ──────────────────────────────────────────
+            for pos in alpaca_positions:
+                try:
+                    current_price = float(pos.current_price)
+
+                    # Determine trailing stop from DB position record
+                    db_pos = self.repo.get_active_position(pos.symbol)
+                    if db_pos is not None and db_pos.trailing_stop_price is not None:
+                        trailing_stop = db_pos.trailing_stop_price
+                    elif db_pos is not None:
+                        trailing_stop = db_pos.entry_price * 0.985  # default 1.5%
+                    else:
+                        trailing_stop = float(pos.avg_entry_price) * 0.985
+
+                    exit_signal = orchestrator.check_exit(
+                        pos.symbol, regime_str, current_price, trailing_stop,
+                    )
+                    if exit_signal is not None:
+                        success = self._process_intraday_exit(exit_signal)
+                        if success:
+                            exit_count += 1
+                        else:
+                            error_count += 1
+                except Exception as e:
+                    logger.error("INTRADAY_CYCLE: %s EXIT 처리 실패: %s", pos.symbol, e)
+                    error_count += 1
+
+            # ── ENTRY PHASE ─────────────────────────────────────────
+            candidate_symbols = [s for s in symbols if s not in active_symbols]
+            available_slots = self.max_positions - len(alpaca_positions) + exit_count
+
+            if available_slots <= 0:
+                skipped_count = len(candidate_symbols)
+                logger.info(
+                    "INTRADAY_CYCLE: 가용 슬롯 없음 (%d/%d), 진입 건너뛰기",
+                    len(alpaca_positions) - exit_count, self.max_positions,
+                )
+            else:
+                try:
+                    entry_signals = orchestrator.scan_entries(candidate_symbols, regime_str)
+                except Exception as e:
+                    logger.error("INTRADAY_CYCLE: scan_entries 실패: %s", e)
+                    entry_signals = []
+                    error_count += 1
+
+                for entry in entry_signals[:available_slots]:
+                    try:
+                        success = self._process_intraday_entry(entry, portfolio_value)
+                        if success:
+                            entry_count += 1
+                        else:
+                            skipped_count += 1
+                    except Exception as e:
+                        logger.error("INTRADAY_CYCLE: %s ENTRY 처리 실패: %s", entry.symbol, e)
+                        error_count += 1
+
+        except Exception as e:
+            logger.error("INTRADAY_CYCLE: 전체 사이클 오류: %s", e, exc_info=True)
+            error_count += 1
+
+        summary = {
+            "status": "success",
+            "entries": entry_count,
+            "exits": exit_count,
+            "skipped": skipped_count,
+            "errors": error_count,
+        }
+        logger.info("INTRADAY_CYCLE 완료: %s", summary)
+        return summary
+
+    def _process_intraday_entry(self, entry: EntrySignal, portfolio_value: float) -> bool:
+        """Execute BUY order from intraday EntrySignal (Phase L.2c).
+
+        Uses Kelly position sizing, distributed lock, and risk-manager checks.
+        Similar to ``_process_buy_signal`` but accepts an ``EntrySignal``
+        instead of a raw dict.
+
+        Args:
+            entry: Validated EntrySignal from DualTimeframeOrchestrator.
+            portfolio_value: Current portfolio value for position sizing.
+
+        Returns:
+            True if order was submitted, False otherwise.
+        """
+        from datetime import timedelta
+
+        from app.core.distributed_lock import get_trading_lock
+
+        with get_trading_lock(entry.symbol, ttl_seconds=30) as lock:
+            if not lock.acquired:
+                logger.warning("INTRADAY_ENTRY: %s BUY 락 획득 실패 - 건너뛰기", entry.symbol)
+                return False
+
+            try:
+                # Risk-manager cooldown / limit check
+                can_enter, reason = self.risk_manager.can_enter_position(entry.symbol)
+                if not can_enter:
+                    logger.info("INTRADAY_ENTRY: %s BUY 차단: %s", entry.symbol, reason)
+                    return False
+
+                # Get current price from latest 15min bar (fallback to daily)
+                now = datetime.now(UTC)
+                bars = self.repo.get_ohlcv_range(
+                    entry.symbol, now - timedelta(hours=2), now, timeframe='15m',
+                )
+                if bars:
+                    current_price = bars[-1].close
+                else:
+                    bars = self.repo.get_ohlcv_range(
+                        entry.symbol, now - timedelta(days=3), now, timeframe='1d',
+                    )
+                    if not bars:
+                        logger.warning(
+                            "INTRADAY_ENTRY: %s 가격 데이터 없음, 진입 건너뛰기", entry.symbol,
+                        )
+                        return False
+                    current_price = bars[-1].close
+
+                # Kelly-based position sizing with regime scale
+                position_scale = self.regime_config.get(
+                    entry.regime, {},
+                ).get("position_scale", 0.5)
+                kelly_size = self.optimizer.kelly_criterion(
+                    self.portfolio_repo, entry.symbol, use_live_data=True,
+                )
+                adjusted_size = kelly_size * position_scale
+                position_value = portfolio_value * adjusted_size
+                qty = int(position_value / current_price)
+
+                if qty < 1:
+                    logger.info(
+                        "INTRADAY_ENTRY: %s BUY 건너뛰기 — Kelly 크기 너무 작음 (%.2f%%)",
+                        entry.symbol, adjusted_size * 100,
+                    )
+                    return False
+
+                # Submit market order via Alpaca
+                order_data = MarketOrderRequest(
+                    symbol=entry.symbol,
+                    qty=qty,
+                    side=OrderSide.BUY,
+                    time_in_force=TimeInForce.DAY,
+                )
+                if self.circuit_breaker:
+                    with self.circuit_breaker.track_api_call():
+                        order = self.api.submit_order(order_data=order_data)
+                else:
+                    order = self.api.submit_order(order_data=order_data)
+
+                logger.info(
+                    "INTRADAY_ENTRY: %s BUY %d주 @ ~$%.2f (reason: %s, order: %s)",
+                    entry.symbol, qty, current_price, entry.reason, order.id,
+                )
+
+                # Record in DB
+                entry_time = datetime.now(UTC)
+                self.repo.record_position_entry(
+                    entry.symbol, current_price, qty, entry_time, regime=entry.regime,
+                )
+                self.risk_manager.record_position_entry(entry.symbol, entry_time)
+
+                # Set initial stop prices
+                db_position = self.repo.get_active_position(entry.symbol)
+                if db_position:
+                    initial_stop_loss = current_price * 0.95  # 5% stop loss
+                    initial_trailing = current_price * 0.985  # 1.5% trailing
+                    initial_take_profit = current_price * 1.10  # 10% take profit
+                    self.repo.update_position_stops(
+                        db_position.id,
+                        trailing_stop_price=initial_trailing,
+                        stop_loss_price=initial_stop_loss,
+                        take_profit_price=initial_take_profit,
+                    )
+
+                self.session.commit()
+
+                # 일일 거래 기록 (Redis 영속화)
+                self.risk_manager.record_trade(
+                    entry.symbol, "BUY", current_price, qty,
+                )
+
+                # Discord notification (best-effort)
+                try:
+                    discord_notifier.send_trade_alert(
+                        action="BUY",
+                        symbol=entry.symbol,
+                        qty=qty,
+                        price=current_price,
+                        extra_info={"reason": entry.reason, "type": "INTRADAY_ENTRY"},
+                    )
+                except Exception:
+                    logger.debug("Discord notification failed", exc_info=True)
+
+                return True
+
+            except Exception as e:
+                logger.error("INTRADAY_ENTRY: %s BUY 주문 실패: %s", entry.symbol, e)
+                return False
+
+    def _process_intraday_exit(self, exit_signal: ExitSignal) -> bool:
+        """Execute SELL order from intraday ExitSignal (Phase L.2c).
+
+        Reuses ``_execute_sell_order`` for Alpaca execution.
+
+        Args:
+            exit_signal: Validated ExitSignal from DualTimeframeOrchestrator.
+
+        Returns:
+            True if order was submitted, False otherwise.
+        """
+        try:
+            position = self.repo.get_active_position(exit_signal.symbol)
+            if position is None:
+                logger.warning(
+                    "INTRADAY_EXIT: %s DB 포지션 없음 — 건너뛰기", exit_signal.symbol,
+                )
+                return False
+
+            # Determine current price from exit signal or latest bar
+            if exit_signal.current_price is not None:
+                current_price = exit_signal.current_price
+            else:
+                from datetime import timedelta
+
+                now = datetime.now(UTC)
+                bars = self.repo.get_ohlcv_range(
+                    exit_signal.symbol, now - timedelta(hours=2), now, timeframe='15m',
+                )
+                if bars:
+                    current_price = bars[-1].close
+                else:
+                    logger.warning(
+                        "INTRADAY_EXIT: %s 가격 데이터 없음, 엔트리 가격 사용",
+                        exit_signal.symbol,
+                    )
+                    current_price = position.entry_price
+
+            reason = f"INTRADAY_EXIT ({exit_signal.exit_reason}): {exit_signal.reason}"
+            self._execute_sell_order(exit_signal.symbol, position, current_price, reason)
+
+            # Discord notification (best-effort)
+            try:
+                discord_notifier.send_warning(
+                    "INTRADAY_EXIT",
+                    f"{exit_signal.symbol} SELL | {reason}",
+                )
+            except Exception:
+                logger.debug("Discord notification failed", exc_info=True)
+
+            return True
+
+        except Exception as e:
+            logger.error("INTRADAY_EXIT: %s SELL 처리 실패: %s", exit_signal.symbol, e)
+            return False

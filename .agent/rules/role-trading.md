@@ -23,7 +23,7 @@ Design and implement the core daily-classification trading engine, learning algo
 - Ensure strict **Type Safety** with type hints.
 - All trades must pass risk manager validation.
 - Implement proper **circuit breaker** patterns for external API calls.
-- All timeframes use **`'1d'` (daily bars)**. No intraday/15-minute references.
+- ML signals use **`'1d'` (daily bars)**. Phase L.2+ adds **`'15m'` bars** for `DualTimeframeOrchestrator` rule-based entry timing (RSI/MACD, not ML).
 - Trade signals come from `predict_class()` (class/confidence/probabilities), NOT regression `predict_next()`.
 
 ## FILE OWNERSHIP
