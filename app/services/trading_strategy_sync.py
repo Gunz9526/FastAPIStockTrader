@@ -70,10 +70,11 @@ class SyncTradingStrategy:
 
         # Signal weights are now dynamic per regime (see REGIME_STRATEGY_WEIGHTS)
         # Fallback weights used when regime is unknown
+        # [Session 33] Deactivated sentiment/fundamentals — ML only
         self._default_weights = {
-            'ml_prediction': 0.75,
-            'sentiment': 0.15,
-            'fundamentals': 0.10,
+            'ml_prediction': 1.0,
+            'sentiment': 0.0,      # Deactivated
+            'fundamentals': 0.0,   # Deactivated
         }
 
         # Alpaca API 초기화
@@ -363,6 +364,16 @@ class SyncTradingStrategy:
         Returns:
             tuple: (sentiment_score, fundamentals_dict)
         """
+        # [Session 33] Skip API calls when sentiment/fund weights are 0 (deactivated)
+        regime_key = (
+            self.current_regime.value
+            if isinstance(self.current_regime, MarketRegime)
+            else str(self.current_regime) if self.current_regime else 'sideways_calm'
+        )
+        weights = REGIME_STRATEGY_WEIGHTS.get(regime_key, self._default_weights)
+        if weights.get('sentiment', 0) == 0 and weights.get('fundamentals', 0) == 0:
+            return 0.0, {'pe_ratio': 15.0, 'pb_ratio': 3.0, 'overvalued': False}
+
         # 기본값 (중립)
         sentiment_score = 0.0
         fundamentals = {'pe_ratio': 15.0, 'pb_ratio': 3.0, 'overvalued': False}
@@ -424,6 +435,16 @@ class SyncTradingStrategy:
         Returns:
             Adjusted confidence value (0.0 - 1.0)
         """
+        # [Session 33] Fast path: if sentiment/fund weights are 0, return raw ML confidence
+        regime_key_fast = (
+            self.current_regime.value
+            if isinstance(self.current_regime, MarketRegime)
+            else str(self.current_regime) if self.current_regime else 'sideways_calm'
+        )
+        weights_fast = REGIME_STRATEGY_WEIGHTS.get(regime_key_fast, self._default_weights)
+        if weights_fast.get('sentiment', 0) == 0 and weights_fast.get('fundamentals', 0) == 0:
+            return max(0.0, min(1.0, confidence))
+
         # Resolve regime-specific weights
         regime_key = (
             self.current_regime.value
@@ -494,6 +515,32 @@ class SyncTradingStrategy:
             return True
         except Exception:
             return False
+
+    def _wait_for_fill(self, order_id: str, timeout_seconds: int = 10) -> tuple[float | None, int | None]:
+        """Poll Alpaca for fill confirmation and return actual fill price.
+
+        Market orders on liquid stocks fill instantly. This method polls
+        ``get_order_by_id()`` up to *timeout_seconds* to capture the actual
+        ``filled_avg_price`` instead of the pre-order estimate.
+
+        Args:
+            order_id: Alpaca order ID from submit_order().
+            timeout_seconds: Max seconds to wait for fill (default 10).
+
+        Returns:
+            Tuple of (filled_avg_price, filled_qty). Both None if timeout or error.
+        """
+        import time
+        for _ in range(timeout_seconds):
+            try:
+                order = self.api.get_order_by_id(order_id)
+                if order.filled_avg_price is not None:
+                    return float(order.filled_avg_price), int(order.filled_qty)
+            except Exception:
+                logger.debug("Fill price poll failed for order %s", order_id)
+            time.sleep(1)
+        logger.warning("Fill price timeout for order %s — using estimated price", order_id)
+        return None, None
 
     def _place_order(
         self,
@@ -619,17 +666,27 @@ class SyncTradingStrategy:
                 logger.info("주문 실행: %s %s (ID: %s)", side.upper(), symbol, order.id)
                 order_success = True
 
+                # Alpaca 실제 체결 가격 조회
+                fill_price, fill_qty = self._wait_for_fill(str(order.id))
+                actual_price = fill_price if fill_price is not None else price
+                actual_qty = fill_qty if fill_qty is not None else qty
+                logger.info(
+                    "%s 체결가 $%.2f (예상가 $%.2f)",
+                    symbol, actual_price, price,
+                )
+
                 # Discord 거래 알림 전송
                 discord_notifier.send_trade_alert(
                     action=side.upper(),
                     symbol=symbol,
-                    qty=qty,
-                    price=price,
+                    qty=actual_qty,
+                    price=actual_price,
                     extra_info={
                         "Order ID": str(order.id),
                         "Type": order_type,
-                        "Regime": self.current_regime.value if self.current_regime else "N/A"
-                    }
+                        "Estimated Price": f"${price:.2f}",
+                    },
+                    regime=self.current_regime.value if self.current_regime else None,
                 )
 
                 # Phase I.1: DB에 포지션 진입/종료 기록
@@ -638,19 +695,26 @@ class SyncTradingStrategy:
                     entry_time = datetime.now(UTC)  # timezone-aware
                     # Record current market regime
                     regime_str = self.current_regime.value if self.current_regime else None
-                    self.repo.record_position_entry(symbol, price, qty, entry_time, regime=regime_str)
+                    self.repo.record_position_entry(symbol, actual_price, actual_qty, entry_time, regime=regime_str)
                     self.risk_manager.record_position_entry(symbol, entry_time)
                     self.db.commit()
+                    # 일일 거래 기록 (Redis 영속화) — TD-1
+                    self.risk_manager.record_trade(symbol, "BUY", actual_price, actual_qty)
                 elif side == "sell":
                     # Use with_for_update for safe position update
                     active_position = self.repo.get_active_position_for_update(symbol)
                     if active_position:
                         # 손익 계산
-                        realized_pnl = (price - active_position.entry_price) * active_position.quantity
+                        realized_pnl = (actual_price - active_position.entry_price) * active_position.quantity
                         try:
-                            self.repo.update_position_exit(active_position.id, price)
+                            self.repo.update_position_exit(active_position.id, actual_price)
                             self.risk_manager.record_position_exit(symbol)
                             self.db.commit()
+                            # 일일 거래 기록 (Redis 영속화) — TD-1
+                            self.risk_manager.record_trade(
+                                symbol, "SELL", actual_price, active_position.quantity,
+                                realized_pl=realized_pnl,
+                            )
                         except Exception as db_err:
                             logger.critical(
                                 "CRITICAL: Alpaca SELL 주문 성공했으나 DB 업데이트 실패! "
@@ -863,6 +927,10 @@ class SyncTradingStrategy:
                     # 이미 포지션 보유 - SELL 확인
                     self._process_sell_signal(symbol, signal_data)
                 elif symbol in selected_symbols and len(active_positions) < self.max_positions:
+                    # 일일 매수 한도 확인
+                    if not self.risk_manager.can_buy_today():
+                        logger.info("일일 매수 한도 도달 — 추가 매수 중단")
+                        break
                     # 신규 포지션 - BUY 확인
                     self._process_buy_signal(symbol, signal_data, portfolio_value)
 
@@ -1009,18 +1077,27 @@ class SyncTradingStrategy:
 
                 logger.info("주문 실행: BUY %s (ID: %s)", symbol, order.id)
 
+                # Alpaca 실제 체결 가격 조회
+                fill_price, fill_qty = self._wait_for_fill(str(order.id))
+                actual_price = fill_price if fill_price is not None else current_price
+                actual_qty = fill_qty if fill_qty is not None else qty
+                logger.info(
+                    "%s 체결가 $%.2f (예상가 $%.2f)",
+                    symbol, actual_price, current_price,
+                )
+
                 # DB에 기록
                 entry_time = datetime.now(UTC)  # timezone-aware
                 regime_str = self.current_regime.value if self.current_regime else None
-                self.repo.record_position_entry(symbol, current_price, qty, entry_time, regime=regime_str)
+                self.repo.record_position_entry(symbol, actual_price, actual_qty, entry_time, regime=regime_str)
                 self.risk_manager.record_position_entry(symbol, entry_time)
 
                 # Set initial stop prices
                 db_position = self.repo.get_active_position(symbol)
                 if db_position:
-                    initial_stop_loss = current_price * 0.95  # 5% stop loss
-                    initial_trailing = current_price * 0.985  # 1.5% trailing
-                    initial_take_profit = current_price * 1.10  # 10% take profit
+                    initial_stop_loss = actual_price * 0.95  # 5% stop loss
+                    initial_trailing = actual_price * 0.985  # 1.5% trailing
+                    initial_take_profit = actual_price * 1.10  # 10% take profit
                     self.repo.update_position_stops(
                         db_position.id,
                         trailing_stop_price=initial_trailing,
@@ -1032,7 +1109,7 @@ class SyncTradingStrategy:
 
                 # 일일 거래 기록 (Redis 영속화)
                 self.risk_manager.record_trade(
-                    symbol, "BUY", current_price, qty,
+                    symbol, "BUY", actual_price, actual_qty,
                 )
 
                 # Discord 알림
@@ -1040,13 +1117,18 @@ class SyncTradingStrategy:
                     discord_notifier.send_trade_alert(
                         action="BUY",
                         symbol=symbol,
-                        qty=qty,
-                        price=current_price,
+                        qty=actual_qty,
+                        price=actual_price,
                         extra_info={
                             "Order ID": str(order.id),
                             "Type": "PORTFOLIO_BUY",
-                            "Regime": self.current_regime.value if self.current_regime else "N/A",
+                            "Estimated Price": f"${current_price:.2f}",
                         },
+                        confidence=signal_data.get('confidence'),
+                        predicted_class=signal_data.get('class'),
+                        regime=self.current_regime.value if self.current_regime else None,
+                        kelly_fraction=signal_data.get('kelly'),
+                        portfolio_value=portfolio_value,
                     )
                 except Exception:
                     logger.debug("Discord notification failed", exc_info=True)
@@ -1151,7 +1233,29 @@ class SyncTradingStrategy:
                     logger.warning("%s: 포지션 이미 닫힘 - SELL 건너뛰기", symbol)
                     return
 
+                # Alpaca 실제 보유수량 검증 (Source of Truth)
                 qty = locked_pos.quantity
+                try:
+                    alpaca_pos = self.api.get_open_position(symbol)
+                    alpaca_qty = int(alpaca_pos.qty_available) if alpaca_pos.qty_available else int(alpaca_pos.qty)
+                    if alpaca_qty != qty:
+                        logger.warning(
+                            "%s 수량 불일치: DB=%d, Alpaca=%d — Alpaca 수량 사용",
+                            symbol, qty, alpaca_qty,
+                        )
+                        qty = alpaca_qty
+                        # DB 수량도 보정
+                        locked_pos.quantity = alpaca_qty
+                        self.session.flush()
+                except Exception as e:
+                    logger.warning("%s Alpaca 포지션 조회 실패 — DB 수량(%d) 사용: %s", symbol, qty, e)
+
+                if qty <= 0:
+                    logger.warning("%s: 보유수량 0 — SELL 건너뛰기", symbol)
+                    self.repo.update_position_exit(locked_pos.id, current_price)
+                    self.session.commit()
+                    return
+
                 order_data = MarketOrderRequest(
                     symbol=symbol,
                     qty=qty,
@@ -1164,19 +1268,25 @@ class SyncTradingStrategy:
                 else:
                     order = self.api.submit_order(order_data=order_data)
 
-                logger.info("주문 실행: SELL %s x%d @ $%.2f (ID: %s, 이유: %s)",
-                           symbol, qty, current_price, order.id, reason)
+                # Alpaca 실제 체결 가격 조회
+                fill_price, fill_qty = self._wait_for_fill(str(order.id))
+                actual_price = fill_price if fill_price is not None else current_price
+                actual_qty = fill_qty if fill_qty is not None else qty
+                logger.info(
+                    "주문 실행: SELL %s x%d @ $%.2f (ID: %s, 이유: %s) | 체결가 $%.2f (예상가 $%.2f)",
+                    symbol, actual_qty, actual_price, order.id, reason, actual_price, current_price,
+                )
 
                 # DB 업데이트
                 try:
-                    self.repo.update_position_exit(locked_pos.id, current_price)
+                    self.repo.update_position_exit(locked_pos.id, actual_price)
                     self.risk_manager.record_position_exit(symbol)
                     self.session.commit()
 
                     # 일일 거래 기록 (Redis 영속화)
-                    realized_pnl = (current_price - locked_pos.entry_price) * qty
+                    realized_pnl = (actual_price - locked_pos.entry_price) * locked_pos.quantity
                     self.risk_manager.record_trade(
-                        symbol, "SELL", current_price, qty,
+                        symbol, "SELL", actual_price, locked_pos.quantity,
                         realized_pl=realized_pnl,
                     )
 
@@ -1185,13 +1295,18 @@ class SyncTradingStrategy:
                         discord_notifier.send_trade_alert(
                             action="SELL",
                             symbol=symbol,
-                            qty=qty,
-                            price=current_price,
+                            qty=actual_qty,
+                            price=actual_price,
                             extra_info={
                                 "Order ID": str(order.id),
                                 "Type": "PORTFOLIO_SELL",
                                 "Reason": reason,
+                                "Estimated Price": f"${current_price:.2f}",
                             },
+                            regime=self.current_regime.value if self.current_regime else None,
+                            pnl_amount=realized_pnl,
+                            pnl_pct=((actual_price - locked_pos.entry_price) / locked_pos.entry_price) if locked_pos.entry_price else None,
+                            hold_duration_hours=((datetime.now(UTC) - locked_pos.entry_time).total_seconds() / 3600) if locked_pos.entry_time else None,
                         )
                     except Exception:
                         logger.debug("Discord notification failed", exc_info=True)
@@ -1318,6 +1433,10 @@ class SyncTradingStrategy:
 
                 for entry in entry_signals[:available_slots]:
                     try:
+                        # 일일 매수 한도 확인
+                        if not self.risk_manager.can_buy_today():
+                            logger.info("INTRADAY_CYCLE: 일일 매수 한도 도달 — 추가 진입 중단")
+                            break
                         success = self._process_intraday_entry(entry, portfolio_value)
                         if success:
                             entry_count += 1
@@ -1420,24 +1539,28 @@ class SyncTradingStrategy:
                 else:
                     order = self.api.submit_order(order_data=order_data)
 
+                # Alpaca 실제 체결 가격 조회
+                fill_price, fill_qty = self._wait_for_fill(str(order.id))
+                actual_price = fill_price if fill_price is not None else current_price
+                actual_qty = fill_qty if fill_qty is not None else qty
                 logger.info(
-                    "INTRADAY_ENTRY: %s BUY %d주 @ ~$%.2f (reason: %s, order: %s)",
-                    entry.symbol, qty, current_price, entry.reason, order.id,
+                    "INTRADAY_ENTRY: %s BUY %d주 @ $%.2f (reason: %s, order: %s) | 체결가 $%.2f (예상가 $%.2f)",
+                    entry.symbol, actual_qty, actual_price, entry.reason, order.id, actual_price, current_price,
                 )
 
                 # Record in DB
                 entry_time = datetime.now(UTC)
                 self.repo.record_position_entry(
-                    entry.symbol, current_price, qty, entry_time, regime=entry.regime,
+                    entry.symbol, actual_price, actual_qty, entry_time, regime=entry.regime,
                 )
                 self.risk_manager.record_position_entry(entry.symbol, entry_time)
 
                 # Set initial stop prices
                 db_position = self.repo.get_active_position(entry.symbol)
                 if db_position:
-                    initial_stop_loss = current_price * 0.95  # 5% stop loss
-                    initial_trailing = current_price * 0.985  # 1.5% trailing
-                    initial_take_profit = current_price * 1.10  # 10% take profit
+                    initial_stop_loss = actual_price * 0.95  # 5% stop loss
+                    initial_trailing = actual_price * 0.985  # 1.5% trailing
+                    initial_take_profit = actual_price * 1.10  # 10% take profit
                     self.repo.update_position_stops(
                         db_position.id,
                         trailing_stop_price=initial_trailing,
@@ -1449,7 +1572,7 @@ class SyncTradingStrategy:
 
                 # 일일 거래 기록 (Redis 영속화)
                 self.risk_manager.record_trade(
-                    entry.symbol, "BUY", current_price, qty,
+                    entry.symbol, "BUY", actual_price, actual_qty,
                 )
 
                 # Discord notification (best-effort)
@@ -1457,9 +1580,15 @@ class SyncTradingStrategy:
                     discord_notifier.send_trade_alert(
                         action="BUY",
                         symbol=entry.symbol,
-                        qty=qty,
-                        price=current_price,
-                        extra_info={"reason": entry.reason, "type": "INTRADAY_ENTRY"},
+                        qty=actual_qty,
+                        price=actual_price,
+                        extra_info={
+                            "reason": entry.reason,
+                            "type": "INTRADAY_ENTRY",
+                            "Estimated Price": f"${current_price:.2f}",
+                        },
+                        confidence=entry.confidence if hasattr(entry, 'confidence') else None,
+                        regime=entry.regime if hasattr(entry, 'regime') else None,
                     )
                 except Exception:
                     logger.debug("Discord notification failed", exc_info=True)
@@ -1513,9 +1642,22 @@ class SyncTradingStrategy:
 
             # Discord notification (best-effort)
             try:
-                discord_notifier.send_warning(
-                    "INTRADAY_EXIT",
-                    f"{exit_signal.symbol} SELL | {reason}",
+                pnl_amt = (current_price - position.entry_price) * position.quantity if position.entry_price else None
+                pnl_pct_val = ((current_price - position.entry_price) / position.entry_price) if position.entry_price else None
+                hold_hrs = ((datetime.now(UTC) - position.entry_time).total_seconds() / 3600) if position.entry_time else None
+                discord_notifier.send_trade_alert(
+                    action="SELL",
+                    symbol=exit_signal.symbol,
+                    qty=position.quantity,
+                    price=current_price,
+                    extra_info={
+                        "Type": "INTRADAY_EXIT",
+                        "Reason": reason,
+                    },
+                    regime=self.current_regime.value if self.current_regime else None,
+                    pnl_amount=pnl_amt,
+                    pnl_pct=pnl_pct_val,
+                    hold_duration_hours=hold_hrs,
                 )
             except Exception:
                 logger.debug("Discord notification failed", exc_info=True)

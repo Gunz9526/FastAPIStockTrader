@@ -224,29 +224,26 @@ class TestExtractFeatureVector:
 
     @patch("app.ml.features.joblib")
     @patch("app.ml.features.os.makedirs")
-    def test_extract_feature_vector_with_market_avg_volume(
+    def test_extract_feature_vector_relative_volume_passthrough(
         self,
         _mock_makedirs: MagicMock,
         _mock_joblib: MagicMock,
         fe: FeatureEngineer,
     ) -> None:
-        """``market_avg_volume`` 전달 시 ``relative_volume`` 이 올바르게 계산되어야 한다."""
+        """``relative_volume`` 이 이미 DataFrame에 존재하면 그대로 전달되어야 한다."""
         cols = fe.core_feature_columns
         rng = np.random.default_rng(1)
         df = pd.DataFrame(rng.standard_normal((50, len(cols))), columns=cols)
-        # volume 컬럼 추가 (relative_volume 계산에 필요)
-        df["volume"] = 5000.0
+        # relative_volume 컬럼이 이미 존재하는 경우
+        df["relative_volume"] = 0.75
 
-        market_avg = 10_000.0
         result = fe.extract_feature_vector(
             df,
             fit_scaler=True,
-            market_avg_volume=market_avg,
             feature_set="core",
         )
 
         assert not result.empty
-        # relative_volume = 5000 / 10000 = 0.5 → 스케일링 전 원본 확인 불가하나
         # relative_volume 컬럼이 결과에 포함되어 있어야 한다.
         assert "relative_volume" in result.columns
 

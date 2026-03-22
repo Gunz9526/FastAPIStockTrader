@@ -14,10 +14,17 @@
   },
   "editable": true,
   "gnetId": null,
-  "graphTooltip": 0,
+  "graphTooltip": 1,
   "id": null,
   "links": [],
   "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 100,
+      "title": "📊 Account Overview (Prometheus)",
+      "type": "row"
+    },
     {
       "datasource": "Prometheus",
       "fieldConfig": {
@@ -35,7 +42,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 1 },
       "id": 1,
       "options": {
         "colorMode": "value",
@@ -43,10 +50,8 @@
         "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "text": {},
         "textMode": "auto"
       },
-      "pluginVersion": "8.0.0",
       "targets": [ { "expr": "portfolio_value_usd", "refId": "A" } ],
       "title": "Portfolio Value",
       "type": "stat"
@@ -65,7 +70,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 },
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 1 },
       "id": 2,
       "options": {
         "colorMode": "value",
@@ -73,10 +78,8 @@
         "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "text": {},
         "textMode": "auto"
       },
-      "pluginVersion": "8.0.0",
       "targets": [ { "expr": "account_buying_power_usd", "refId": "A" } ],
       "title": "Buying Power",
       "type": "stat"
@@ -95,7 +98,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 0 },
+      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 1 },
       "id": 3,
       "options": {
         "colorMode": "value",
@@ -103,24 +106,521 @@
         "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "text": {},
         "textMode": "auto"
       },
-      "pluginVersion": "8.0.0",
       "targets": [ { "expr": "open_positions_count", "refId": "A" } ],
       "title": "Open Positions",
       "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 6 },
+      "id": 101,
+      "title": "💰 P&L Summary (PostgreSQL)",
+      "type": "row"
+    },
+    {
+      "datasource": "PostgreSQL",
+      "description": "Cumulative realized P&L over time from closed trades",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisLabel": "P&L ($)",
+            "drawStyle": "line",
+            "fillOpacity": 20,
+            "gradientMode": "scheme",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": true
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 7 },
+      "id": 10,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "single" }
+      },
+      "targets": [
+        {
+          "format": "time_series",
+          "rawSql": "SELECT execution_time AS time, SUM(COALESCE(realized_pl, 0)) OVER (ORDER BY execution_time) AS cumulative_pnl FROM trade_logs WHERE action = 'SELL' AND realized_pl IS NOT NULL ORDER BY execution_time",
+          "refId": "A"
+        }
+      ],
+      "title": "Cumulative P&L",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "PostgreSQL",
+      "description": "Percentage of winning trades (realized P&L > 0)",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 40 },
+              { "color": "green", "value": 55 }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 7 },
+      "id": 11,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT ROUND(100.0 * COUNT(*) FILTER (WHERE realized_pl > 0) / NULLIF(COUNT(*), 0), 1) AS win_rate FROM trade_logs WHERE action = 'SELL' AND realized_pl IS NOT NULL",
+          "refId": "A"
+        }
+      ],
+      "title": "Win Rate",
+      "type": "stat"
+    },
+    {
+      "datasource": "PostgreSQL",
+      "description": "Total number of executed trades",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [ { "color": "blue", "value": null } ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 7 },
+      "id": 12,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT COUNT(*) AS total_trades FROM trade_logs",
+          "refId": "A"
+        }
+      ],
+      "title": "Total Trades",
+      "type": "stat"
+    },
+    {
+      "datasource": "PostgreSQL",
+      "description": "Total realized P&L and average P&L per trade",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 0 }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 11 },
+      "id": 13,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT ROUND(SUM(realized_pl)::numeric, 2) AS total_pnl FROM trade_logs WHERE action = 'SELL' AND realized_pl IS NOT NULL",
+          "refId": "A"
+        }
+      ],
+      "title": "Total Realized P&L",
+      "type": "stat"
+    },
+    {
+      "datasource": "PostgreSQL",
+      "description": "Average P&L per closed trade",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 0 }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 11 },
+      "id": 14,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT ROUND(AVG(realized_pl)::numeric, 2) AS avg_pnl FROM trade_logs WHERE action = 'SELL' AND realized_pl IS NOT NULL",
+          "refId": "A"
+        }
+      ],
+      "title": "Avg P&L per Trade",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 15 },
+      "id": 102,
+      "title": "📈 Per-Symbol & Daily Analytics",
+      "type": "row"
+    },
+    {
+      "datasource": "PostgreSQL",
+      "description": "Realized P&L breakdown by symbol",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisLabel": "P&L ($)",
+            "fillOpacity": 80,
+            "gradientMode": "none"
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "id": 20,
+      "options": {
+        "barWidth": 0.8,
+        "groupWidth": 0.7,
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "orientation": "horizontal",
+        "showValue": "auto",
+        "stacking": "none",
+        "tooltip": { "mode": "single" }
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT symbol, ROUND(SUM(realized_pl)::numeric, 2) AS pnl FROM trade_logs WHERE action = 'SELL' AND realized_pl IS NOT NULL GROUP BY symbol ORDER BY pnl DESC LIMIT 20",
+          "refId": "A"
+        }
+      ],
+      "title": "P&L by Symbol",
+      "type": "barchart"
+    },
+    {
+      "datasource": "PostgreSQL",
+      "description": "Daily aggregated P&L from closed trades",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisLabel": "P&L ($)",
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "never"
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "id": 21,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "single" }
+      },
+      "targets": [
+        {
+          "format": "time_series",
+          "rawSql": "SELECT DATE_TRUNC('day', execution_time) AS time, ROUND(SUM(realized_pl)::numeric, 2) AS daily_pnl FROM trade_logs WHERE action = 'SELL' AND realized_pl IS NOT NULL GROUP BY DATE_TRUNC('day', execution_time) ORDER BY time",
+          "refId": "A"
+        }
+      ],
+      "title": "Daily P&L",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 },
+      "id": 103,
+      "title": "📋 Trade History & Active Positions",
+      "type": "row"
+    },
+    {
+      "datasource": "PostgreSQL",
+      "description": "Latest 50 trades with full details",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "realized_pl" },
+            "properties": [
+              { "id": "unit", "value": "currencyUSD" },
+              { "id": "custom.cellOptions", "value": { "type": "color-text" } },
+              { "id": "thresholds", "value": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 0 }] } }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "price" },
+            "properties": [{ "id": "unit", "value": "currencyUSD" }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "fill_price" },
+            "properties": [{ "id": "unit", "value": "currencyUSD" }]
+          }
+        ]
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 25 },
+      "id": 30,
+      "options": {
+        "showHeader": true,
+        "sortBy": [{ "desc": true, "displayName": "execution_time" }]
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT execution_time, symbol, action, quantity, ROUND(price::numeric, 2) AS price, ROUND(fill_price::numeric, 2) AS fill_price, ROUND(realized_pl::numeric, 2) AS realized_pl, regime, confidence, predicted_class, order_id FROM trade_logs ORDER BY execution_time DESC LIMIT 50",
+          "refId": "A"
+        }
+      ],
+      "title": "Trade History (Latest 50)",
+      "type": "table"
+    },
+    {
+      "datasource": "PostgreSQL",
+      "description": "Currently open positions with entry details and unrealized P&L",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "entry_price" },
+            "properties": [{ "id": "unit", "value": "currencyUSD" }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "trailing_stop_price" },
+            "properties": [{ "id": "unit", "value": "currencyUSD" }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "stop_loss_price" },
+            "properties": [{ "id": "unit", "value": "currencyUSD" }]
+          }
+        ]
+      },
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 33 },
+      "id": 31,
+      "options": {
+        "showHeader": true,
+        "sortBy": [{ "desc": true, "displayName": "entry_time" }]
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT symbol, entry_time, ROUND(entry_price::numeric, 2) AS entry_price, quantity, regime, ROUND(stop_loss_price::numeric, 2) AS stop_loss_price, ROUND(take_profit_price::numeric, 2) AS take_profit_price, ROUND(trailing_stop_price::numeric, 2) AS trailing_stop_price FROM position_tracking WHERE exit_time IS NULL ORDER BY entry_time DESC",
+          "refId": "A"
+        }
+      ],
+      "title": "Active Positions",
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 39 },
+      "id": 104,
+      "title": "🧠 ML & Regime Analytics",
+      "type": "row"
+    },
+    {
+      "datasource": "PostgreSQL",
+      "description": "Distribution of trades across market regimes",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 40 },
+      "id": 40,
+      "options": {
+        "displayLabels": ["name", "percent"],
+        "legend": { "displayMode": "table", "placement": "right", "values": ["value", "percent"] },
+        "pieType": "donut",
+        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "tooltip": { "mode": "single" }
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT COALESCE(regime, 'unknown') AS regime, COUNT(*) AS count FROM trade_logs GROUP BY regime ORDER BY count DESC",
+          "refId": "A"
+        }
+      ],
+      "title": "Trades by Regime",
+      "type": "piechart"
+    },
+    {
+      "datasource": "PostgreSQL",
+      "description": "Average holding period for closed positions",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 5 },
+              { "color": "red", "value": 14 }
+            ]
+          },
+          "unit": "d"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 8, "x": 8, "y": 40 },
+      "id": 41,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT ROUND(AVG(EXTRACT(EPOCH FROM (exit_time - entry_time)) / 86400)::numeric, 1) AS avg_hold_days FROM position_tracking WHERE exit_time IS NOT NULL",
+          "refId": "A"
+        }
+      ],
+      "title": "Avg Hold Duration",
+      "type": "stat"
+    },
+    {
+      "datasource": "PostgreSQL",
+      "description": "Win rate per market regime",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "fillOpacity": 80
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 8, "x": 8, "y": 44 },
+      "id": 42,
+      "options": {
+        "barWidth": 0.7,
+        "groupWidth": 0.7,
+        "legend": { "displayMode": "hidden" },
+        "orientation": "horizontal",
+        "showValue": "always",
+        "stacking": "none",
+        "tooltip": { "mode": "single" }
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT COALESCE(regime, 'unknown') AS regime, ROUND(100.0 * COUNT(*) FILTER (WHERE realized_pl > 0) / NULLIF(COUNT(*), 0), 1) AS win_rate FROM trade_logs WHERE action = 'SELL' AND realized_pl IS NOT NULL GROUP BY regime ORDER BY win_rate DESC",
+          "refId": "A"
+        }
+      ],
+      "title": "Win Rate by Regime",
+      "type": "barchart"
+    },
+    {
+      "datasource": "PostgreSQL",
+      "description": "P&L distribution by predicted ML class",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "fillOpacity": 80
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 40 },
+      "id": 43,
+      "options": {
+        "barWidth": 0.7,
+        "groupWidth": 0.7,
+        "legend": { "displayMode": "hidden" },
+        "orientation": "vertical",
+        "showValue": "always",
+        "stacking": "none",
+        "tooltip": { "mode": "single" }
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT CASE predicted_class WHEN 0 THEN 'DOWN' WHEN 1 THEN 'NEUTRAL' WHEN 2 THEN 'UP' ELSE 'N/A' END AS predicted_class, ROUND(SUM(realized_pl)::numeric, 2) AS total_pnl, COUNT(*) AS trades FROM trade_logs WHERE action = 'SELL' AND realized_pl IS NOT NULL GROUP BY predicted_class ORDER BY predicted_class",
+          "refId": "A"
+        }
+      ],
+      "title": "P&L by Predicted Class",
+      "type": "barchart"
     }
   ],
-  "refresh": "10s",
-  "schemaVersion": 27,
+  "refresh": "30s",
+  "schemaVersion": 37,
   "style": "dark",
-  "tags": ["trading", "stock", "ml"],
+  "tags": ["trading", "stock", "ml", "pnl"],
   "templating": { "list": [] },
-  "time": { "from": "now-6h", "to": "now" },
-  "timepicker": {},
-  "timezone": "",
-  "title": "Stock Trading Dashboard",
+  "time": { "from": "now-30d", "to": "now" },
+  "timepicker": {
+    "refresh_intervals": ["10s", "30s", "1m", "5m"],
+    "time_options": ["7d", "14d", "30d", "90d", "180d", "1y"]
+  },
+  "timezone": "America/New_York",
+  "title": "Stock Trading P&L Dashboard",
   "uid": "stock-trading-01",
-  "version": 1
+  "version": 2
 }

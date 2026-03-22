@@ -144,7 +144,7 @@ class FeatureEngineer:
                 df['sector_id'] = get_sector_id(symbol)
             else:
                 logger.warning("No 'symbol' column found - cannot add sector feature")
-                df['sector_id'] = 12  # Unknown sector (SECTOR_TO_ID['Unknown'] = 12)
+                df['sector_id'] = 0  # Default to Technology (most common, always in training set)
 
             # 11. VWAP-based features (if VWAP data available)
             if 'vwap' in df.columns and df['vwap'].notna().any():
@@ -182,11 +182,17 @@ class FeatureEngineer:
             low_20 = talib.MIN(low, timeperiod=20)
             df['price_position'] = (close - low_20) / (high_20 - low_20 + 1e-8)
 
-            # 14. Sentiment features (Phase F.1)
+            # 14. Relative Volume (market-relative volume indicator)
+            # Uses expanding mean to avoid look-ahead bias (each bar uses only past + current volume)
+            expanding_avg = df['volume'].expanding(min_periods=1).mean()
+            df['relative_volume'] = volume / expanding_avg.values
+            df['relative_volume'] = df['relative_volume'].fillna(1.0)
+
+            # 15. Sentiment features (Phase F.1)
             # NOTE: Sentiment is fetched separately and passed as additional context
             # We'll add it during extract_feature_vector if available
 
-            # 15. Fundamental features (Phase F.2)
+            # 16. Fundamental features (Phase F.2)
             # NOTE: Fundamentals are fetched separately and passed as additional context
             # We'll add them during extract_feature_vector if available
 
@@ -203,7 +209,6 @@ class FeatureEngineer:
         self,
         df: pd.DataFrame,
         fit_scaler: bool = False,
-        market_avg_volume: float = None,
         sentiment_score: float | None = None,
         fundamental_data: dict[str, float] | None = None,
         feature_set: str = "legacy",
@@ -215,14 +220,13 @@ class FeatureEngineer:
         Args:
             df: DataFrame with technical indicators
             fit_scaler: If True, fit scaler on this data (for training)
-            market_avg_volume: Average volume across all symbols (for relative volume)
             sentiment_score: Sentiment score from -1.0 to +1.0 (Phase F.1)
             fundamental_data: Dict with 'pe_ratio', 'pb_ratio', 'roe', etc. (Phase F.2)
             feature_set: Which feature set to use:
-                - "legacy": 25 features (existing model compatibility)
-                - "core": 21 features (no Phase F, no momentum)
-                - "base": 27 features (with momentum, no Phase F)
-                - "full": 32 features (all features including Phase F)
+                - "legacy": 24 features (existing model compatibility)
+                - "core": 20 features (no Phase F, no momentum)
+                - "base": 25 features (with momentum, no Phase F)
+                - "full": 30 features (all features including Phase F)
             scaler_suffix: Optional suffix for regime-specific scaler files.
                 When provided, scaler is saved/loaded as
                 ``feature_scaler_{suffix}.pkl`` instead of ``feature_scaler.pkl``.
@@ -237,11 +241,9 @@ class FeatureEngineer:
         df = df.copy()
 
         try:
-            # 시장 대비 거래량 피처 추가
-            if market_avg_volume is not None and 'volume' in df.columns:
-                df.loc[:, 'relative_volume'] = df['volume'] / market_avg_volume
-            elif 'relative_volume' not in df.columns:
-                df.loc[:, 'relative_volume'] = 1.0  # 시장 데이터 없으면 중립값
+            # relative_volume safety net (should already be computed by create_features)
+            if 'relative_volume' not in df.columns:
+                df.loc[:, 'relative_volume'] = 1.0  # Fallback: should not reach here in normal path
 
             # Phase F features - add only when needed by feature_set
             include_phase_f = feature_set in ("legacy", "full")
@@ -375,7 +377,7 @@ class FeatureEngineer:
         IMPORTANT: Existing models were trained with 25 features BEFORE Phase H.4 momentum
         features were added. This list matches the original training data structure.
         
-        After retraining with new features, switch to base_feature_columns (27 features).
+        After retraining with new features, switch to base_feature_columns (26 features).
         
         Returns:
             List of 25 legacy feature names (no momentum features, includes Phase F)

@@ -1,0 +1,22 @@
+# Grafana PostgreSQL datasource provisioning
+# Place in grafana/provisioning/datasources/ or mount via docker-compose
+apiVersion: 1
+
+datasources:
+  - name: PostgreSQL
+    type: postgres
+    access: proxy
+    url: ${POSTGRES_HOST:-db}:${POSTGRES_PORT:-5432}
+    database: ${POSTGRES_DB:-stock_trader}
+    user: ${POSTGRES_USER:-postgres}
+    secureJsonData:
+      password: ${POSTGRES_PASSWORD}
+    jsonData:
+      sslmode: disable
+      maxOpenConns: 5
+      maxIdleConns: 2
+      connMaxLifetime: 14400
+      postgresVersion: 1500
+      timescaledb: true
+    isDefault: false
+    editable: true

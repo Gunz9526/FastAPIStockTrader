@@ -105,25 +105,30 @@ class RegimeDetector:
 
 # Regime-specific signal weighting for trading strategy
 # Weights must sum to 1.0 for each regime
+#
+# [Session 33] Sentiment & fundamentals DEACTIVATED (weight=0).
+# ML is sole signal source until sentiment/fundamentals pipelines are validated.
+# To restore: set sentiment/fundamentals weights back to non-zero values
+# (original values preserved in git history).
 REGIME_STRATEGY_WEIGHTS: dict[str, dict[str, float]] = {
     'bull_trending': {
-        'ml_prediction': 0.80,   # ML very reliable in trends
-        'sentiment': 0.12,       # Sentiment confirms momentum
-        'fundamentals': 0.08,    # Less relevant in strong trends
+        'ml_prediction': 1.0,    # Full ML reliance (sentiment/fundamentals deactivated)
+        'sentiment': 0.0,        # Deactivated — reactivate when validated
+        'fundamentals': 0.0,     # Deactivated — reactivate when validated
     },
     'bear_trending': {
-        'ml_prediction': 0.65,   # ML less reliable in panic
-        'sentiment': 0.15,       # Sentiment useful for reversal signals
-        'fundamentals': 0.20,    # Fundamentals anchor in fear
+        'ml_prediction': 1.0,    # Full ML reliance (sentiment/fundamentals deactivated)
+        'sentiment': 0.0,        # Deactivated — reactivate when validated
+        'fundamentals': 0.0,     # Deactivated — reactivate when validated
     },
     'sideways_volatile': {
-        'ml_prediction': 0.60,   # ML struggles with noise
-        'sentiment': 0.25,       # Sentiment contrarian signals key
-        'fundamentals': 0.15,    # Fundamentals filter overreaction
+        'ml_prediction': 1.0,    # Full ML reliance (sentiment/fundamentals deactivated)
+        'sentiment': 0.0,        # Deactivated — reactivate when validated
+        'fundamentals': 0.0,     # Deactivated — reactivate when validated
     },
     'sideways_calm': {
-        'ml_prediction': 0.75,   # Default balanced
-        'sentiment': 0.15,       # Standard
-        'fundamentals': 0.10,    # Standard
+        'ml_prediction': 1.0,    # Full ML reliance (sentiment/fundamentals deactivated)
+        'sentiment': 0.0,        # Deactivated — reactivate when validated
+        'fundamentals': 0.0,     # Deactivated — reactivate when validated
     },
 }

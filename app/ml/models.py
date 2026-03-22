@@ -12,6 +12,8 @@ from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
 from sklearn.ensemble import VotingClassifier, VotingRegressor
 from xgboost import XGBClassifier, XGBRegressor, DMatrix
 
+from app.ml.sector_map import NUM_SECTORS
+
 logger = logging.getLogger(__name__)
 
 class CompatibleCatBoostRegressor(CatBoostRegressor, BaseEstimator, RegressorMixin):
@@ -421,8 +423,17 @@ def _prepare_categorical_for_predict(X: pd.DataFrame, model_type: str) -> pd.Dat
     X = X.copy()
     if model_type == "catboost":
         X[SECTOR_FEATURE_NAME] = X[SECTOR_FEATURE_NAME].astype(int)
-    else:  # lgbm, xgb
-        X[SECTOR_FEATURE_NAME] = X[SECTOR_FEATURE_NAME].astype("category")
+    elif model_type == "xgb":
+        # XGBoost only learns OBSERVED categories from training data.
+        # Declaring categories=range(13) causes errors when the model
+        # was trained without sector_id=12.  Use range(12) (0-11 only)
+        # and clamp any out-of-range value to 0 (Technology).
+        raw = X[SECTOR_FEATURE_NAME].astype(int).clip(0, 11)
+        X[SECTOR_FEATURE_NAME] = pd.Categorical(raw, categories=range(12))
+    else:  # lgbm
+        X[SECTOR_FEATURE_NAME] = pd.Categorical(
+            X[SECTOR_FEATURE_NAME].astype(int), categories=range(NUM_SECTORS)
+        )
     return X
 
 
@@ -654,7 +665,9 @@ class LGBMClassifierWrapper(ModelWrapper):
             cat_feature_names = [SECTOR_FEATURE_NAME]
             # LightGBM requires categorical columns to be 'category' dtype
             X = X.copy()
-            X[SECTOR_FEATURE_NAME] = X[SECTOR_FEATURE_NAME].astype("category")
+            X[SECTOR_FEATURE_NAME] = pd.Categorical(
+                X[SECTOR_FEATURE_NAME].astype(int), categories=range(NUM_SECTORS)
+            )
             logger.info(
                 "LGBMClassifier: sector_id set as native categorical feature",
             )
@@ -764,9 +777,13 @@ class XGBoostClassifierWrapper(ModelWrapper):
         if isinstance(X, pd.DataFrame) and SECTOR_FEATURE_NAME in X.columns:
             final_params["enable_categorical"] = True
             X = X.copy()
-            X[SECTOR_FEATURE_NAME] = X[SECTOR_FEATURE_NAME].astype("category")
+            # Use range(12) only (0-11): XGBoost learns only observed
+            # categories, so we exclude Unknown(12) to avoid prediction
+            # failures when some regime models never see sector_id=12.
+            raw = X[SECTOR_FEATURE_NAME].astype(int).clip(0, 11)
+            X[SECTOR_FEATURE_NAME] = pd.Categorical(raw, categories=range(12))
             logger.info(
-                "XGBClassifier: sector_id set as native categorical feature",
+                "XGBClassifier: sector_id set as native categorical feature (0-11)",
             )
 
         self.model = XGBClassifier(**final_params)
@@ -973,8 +990,10 @@ class EnsembleClassifierWrapper(ModelWrapper):
                 logger.info("CatBoost trained with cat_features=%s", cat_indices)
 
             elif name == "lgbm":
-                # LightGBM: sector_id as category dtype
-                X_est[SECTOR_FEATURE_NAME] = X_est[SECTOR_FEATURE_NAME].astype("category")
+                # LightGBM: sector_id as category dtype (explicit 0-12)
+                X_est[SECTOR_FEATURE_NAME] = pd.Categorical(
+                    X_est[SECTOR_FEATURE_NAME].astype(int), categories=range(NUM_SECTORS)
+                )
                 estimator.fit(
                     X_est, y,
                     sample_weight=sample_weight,
@@ -983,10 +1002,15 @@ class EnsembleClassifierWrapper(ModelWrapper):
                 logger.info("LightGBM trained with categorical_feature=[%s]", SECTOR_FEATURE_NAME)
 
             elif name == "xgb":
-                # XGBoost: sector_id as category dtype, enable_categorical already in params
-                X_est[SECTOR_FEATURE_NAME] = X_est[SECTOR_FEATURE_NAME].astype("category")
+                # XGBoost: sector_id as category dtype (0-11 only).
+                # Exclude Unknown(12) — XGBoost only learns OBSERVED
+                # categories and rejects unseen ones at prediction time.
+                raw = X_est[SECTOR_FEATURE_NAME].astype(int).clip(0, 11)
+                X_est[SECTOR_FEATURE_NAME] = pd.Categorical(
+                    raw, categories=range(12)
+                )
                 estimator.fit(X_est, y, sample_weight=sample_weight)
-                logger.info("XGBoost trained with enable_categorical + category dtype")
+                logger.info("XGBoost trained with enable_categorical (0-11)")
 
             else:
                 # Fallback: unknown estimator — train normally
@@ -1047,32 +1071,47 @@ class EnsembleClassifierWrapper(ModelWrapper):
             "xgb": "xgb",
         }
 
-        for name, estimator in self.model.named_estimators_.items():
+        failed_indices: list[int] = []
+
+        for idx, (name, estimator) in enumerate(self.model.named_estimators_.items()):
             try:
                 model_type = _estimator_model_type.get(name, "lgbm")
                 X_est = _prepare_categorical_for_predict(X, model_type)
                 if name == "xgb":
+                    # _prepare_categorical_for_predict already clamps
+                    # sector_id to [0, 11] and uses categories=range(12).
                     feature_names = [str(c) for c in X_est.columns]
                     dmatrix = DMatrix(
                         X_est, feature_names=feature_names,
                         enable_categorical=True,
                     )
                     raw = estimator.get_booster().predict(dmatrix)
-                    # multi:softprob returns flat array — reshape to (n, 3)
                     proba = raw.reshape(len(X), len(CLASS_NAMES))
                 else:
                     proba = estimator.predict_proba(X_est)
                 probas.append(proba)
             except Exception:
-                logger.exception("predict_proba failed for estimator '%s'", name)
-                raise
+                logger.warning(
+                    "predict_proba failed for estimator '%s', skipping (graceful degradation)",
+                    name,
+                    exc_info=True,
+                )
+                failed_indices.append(idx)
+
+        if not probas:
+            raise RuntimeError("All estimators failed in ensemble predict_proba")
 
         stacked = np.array(probas)  # (n_estimators, n_samples, n_classes)
-        weights = (
-            np.array(self.weights)
-            if self.weights
-            else np.ones(len(probas)) / len(probas)
-        )
+        if self.weights:
+            all_weights = np.array(self.weights)
+            mask = np.ones(len(all_weights), dtype=bool)
+            for fi in failed_indices:
+                mask[fi] = False
+            active_weights = all_weights[mask]
+            weight_sum = active_weights.sum()
+            weights = active_weights / weight_sum if weight_sum > 0 else np.ones(len(probas)) / len(probas)
+        else:
+            weights = np.ones(len(probas)) / len(probas)
         # Weighted average across estimators
         averaged = np.tensordot(weights, stacked, axes=([0], [0]))
         # Normalise rows to sum to 1 (safety)

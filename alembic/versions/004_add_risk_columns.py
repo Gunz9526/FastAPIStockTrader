@@ -1,12 +1,12 @@
 """Add risk management columns to position_tracking table.
 
-Revision ID: 004_risk_columns_position_tracking
+Revision ID: 004_risk_columns
 Revises: 003_add_partial_indexes
 """
 from alembic import op
 import sqlalchemy as sa
 
-revision = "004_risk_columns_position_tracking"
+revision = "004_risk_columns"
 down_revision = "003_add_partial_indexes"
 branch_labels = None
 depends_on = None

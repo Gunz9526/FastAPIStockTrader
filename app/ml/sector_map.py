@@ -124,6 +124,19 @@ SECTOR_TO_ID: dict[str, int] = {
 # Number of distinct sector categories (for model validation)
 NUM_SECTORS: int = len(SECTOR_TO_ID)  # 13 (12 named + Unknown)
 
+# yfinance returns standard GICS names which differ from our canonical names.
+# Map them so that `get_sector_id()` never falls through to Unknown (12).
+_GICS_NORMALIZE: dict[str, str] = {
+    'Information Technology': 'Technology',
+    'Consumer Discretionary': 'Consumer Cyclical',
+    'Consumer Staples': 'Consumer Defensive',
+    'Financials': 'Financial Services',
+    'Health Care': 'Healthcare',
+    'Materials': 'Basic Materials',
+    # These already match our canonical names:
+    # 'Communication Services', 'Energy', 'Industrials', 'Real Estate', 'Utilities'
+}
+
 @lru_cache(maxsize=1000)
 def get_sector_from_yfinance(symbol: str) -> str:
     """
@@ -147,28 +160,22 @@ def get_sector_from_yfinance(symbol: str) -> str:
 def get_sector(symbol: str) -> str:
     """
     Get sector for a symbol.
-    
-    Priority (UPDATED - API First):
-    1. yfinance API (most up-to-date, cached)
-    2. Manual SECTOR_MAP (fallback if API fails)
-    
-    Rationale:
-    - API provides real-time sector data
-    - Manual map serves as reliable fallback
-    - LRU cache prevents excessive API calls
+
+    Priority (Manual-First):
+    1. Manual SECTOR_MAP — fast, no API overhead, guaranteed match with SECTOR_TO_ID
+    2. yfinance API — for symbols not in SECTOR_MAP (auto-normalized to canonical names)
     """
-    # Priority 1: Auto-fetch from yfinance (cached)
+    # Priority 1: Manual map (fastest, always matches SECTOR_TO_ID keys)
+    if symbol in SECTOR_MAP:
+        return SECTOR_MAP[symbol]
+
+    # Priority 2: Auto-fetch from yfinance for unknown symbols
     sector = get_sector_from_yfinance(symbol)
+    # Normalize GICS sector names to our canonical names
+    sector = _GICS_NORMALIZE.get(sector, sector)
 
-    # Priority 2: Fallback to manual map if API failed
-    if sector == 'Unknown' and symbol in SECTOR_MAP:
-        sector = SECTOR_MAP[symbol]
-        logger.debug(f"Using manual sector for {symbol}: {sector}")
-
-    # Cache for future use (even if Unknown)
-    if symbol not in SECTOR_MAP:
-        SECTOR_MAP[symbol] = sector
-
+    # Cache for future lookups
+    SECTOR_MAP[symbol] = sector
     return sector
 
 def get_sector_id(symbol: str) -> int:

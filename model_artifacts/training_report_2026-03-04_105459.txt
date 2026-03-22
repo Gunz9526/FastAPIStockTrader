@@ -1,0 +1,161 @@
+======================================================================
+MODEL TRAINING REPORT
+Generated: 2026-03-04 10:54:59
+======================================================================
+
+REGIME PERFORMANCE SUMMARY
+------------------------------------------------------------------------------------------
+Regime               Samples    Accuracy     F1         NEUTRAL_R    Status         
+------------------------------------------------------------------------------------------
+bull_trending        1200       38.33%       0.3807     48.35%       success        
+bear_trending        1680       38.69%       0.3901     35.38%       success        
+sideways_volatile    300        N/A          N/A        N/A          insufficient_data
+sideways_calm        23880      37.73%       0.3763     40.20%       success        
+------------------------------------------------------------------------------------------
+
+DATA DISTRIBUTION BY REGIME
+----------------------------------------------------------------------
+sideways_calm: 23,880 samples (88.2%)
+bear_trending: 1,680 samples (6.2%)
+bull_trending: 1,200 samples (4.4%)
+sideways_volatile: 300 samples (1.1%)
+
+Total samples: 27,060
+----------------------------------------------------------------------
+
+DETAILED METRICS
+----------------------------------------------------------------------
+
+[bull_trending]
+  samples: 1200
+  train_samples: 960
+  validation_samples: 240
+  accuracy: 0.3833
+  f1_score: 0.3807
+  neutral_recall: 0.4835
+  confusion_matrix: [[23, 31, 29], [22, 44, 25], [20, 21, 25]]
+  pred_distribution: {1: 96, 2: 79, 0: 65}
+  actual_distribution: {1: 91, 0: 83, 2: 66}
+  status: success
+  shap_top10: [('atr_pct', 0.21613883414404533), ('vwap_distance', 0.15828669632009879), ('trade_intensity', 0.12678740777666106), ('sector_id', 0.10788486067777647), ('bb_width', 0.1055854302763121), ('adx', 0.09310497756957306), ('macd_signal', 0.08788448565407796), ('rsi_momentum', 0.08288092662301166), ('relative_volume', 0.08220527772036777), ('volume_ratio', 0.08091584596807944)]
+
+  Classification Report:
+    precision    recall  f1-score   support
+    
+            DOWN       0.35      0.28      0.31        83
+         NEUTRAL       0.46      0.48      0.47        91
+              UP       0.32      0.38      0.34        66
+    
+        accuracy                           0.38       240
+       macro avg       0.38      0.38      0.38       240
+    weighted avg       0.38      0.38      0.38       240
+
+  Top-10 Feature Importance:
+    vwap_distance             139.6995
+    trade_intensity           116.0331
+    atr_pct                   103.8809
+    adx                       96.3467
+    volume_ratio              87.5455
+    relative_volume           84.5711
+    rsi_momentum              76.8251
+    bb_width                  75.5749
+    momentum_5                66.2593
+    stoch_k                   62.5318
+
+  Confusion Matrix (rows=actual, cols=predicted):
+                     DOWN  NEUTRAL       UP
+            DOWN       23       31       29
+         NEUTRAL       22       44       25
+              UP       20       21       25
+
+[bear_trending]
+  samples: 1680
+  train_samples: 1344
+  validation_samples: 336
+  accuracy: 0.3869
+  f1_score: 0.3901
+  neutral_recall: 0.3538
+  confusion_matrix: [[46, 31, 47], [21, 23, 21], [59, 27, 61]]
+  pred_distribution: {2: 129, 0: 126, 1: 81}
+  actual_distribution: {2: 147, 0: 124, 1: 65}
+  status: success
+  shap_top10: [('vwap_distance', 0.1824516347076911), ('atr_pct', 0.12621743015752304), ('stoch_d', 0.11976180995988032), ('trade_intensity', 0.11947571443278271), ('rsi_momentum', 0.10638838527144738), ('momentum_5', 0.10507803426781143), ('relative_volume', 0.09220765571301469), ('volume_ratio', 0.07847976860797556), ('trend_strength', 0.07103598498270462), ('bb_width', 0.07057862771413294)]
+
+  Classification Report:
+    precision    recall  f1-score   support
+    
+            DOWN       0.37      0.37      0.37       124
+         NEUTRAL       0.28      0.35      0.32        65
+              UP       0.47      0.41      0.44       147
+    
+        accuracy                           0.39       336
+       macro avg       0.37      0.38      0.38       336
+    weighted avg       0.40      0.39      0.39       336
+
+  Top-10 Feature Importance:
+    vwap_distance             156.9230
+    rsi_momentum              124.9502
+    momentum_5                116.7492
+    atr_pct                   116.0441
+    volume_ratio              106.8151
+    stoch_k                   105.9124
+    trade_intensity           101.0645
+    adx                       99.5470
+    stoch_d                   97.7771
+    bb_width                  91.9383
+
+  Confusion Matrix (rows=actual, cols=predicted):
+                     DOWN  NEUTRAL       UP
+            DOWN       46       31       47
+         NEUTRAL       21       23       21
+              UP       59       27       61
+
+[sideways_volatile]
+  samples: 300
+  status: insufficient_data
+
+[sideways_calm]
+  samples: 23880
+  train_samples: 19104
+  validation_samples: 4776
+  accuracy: 0.3773
+  f1_score: 0.3763
+  neutral_recall: 0.4020
+  confusion_matrix: [[659, 451, 470], [470, 568, 375], [710, 498, 575]]
+  pred_distribution: {0: 1839, 1: 1517, 2: 1420}
+  actual_distribution: {2: 1783, 0: 1580, 1: 1413}
+  status: success
+  shap_top10: [('atr_pct', 0.10161371332618432), ('volume_ratio', 0.031437150272911066), ('sector_id', 0.025552058115582366), ('roc', 0.02482787595237911), ('vwap_distance', 0.02281005532789136), ('stoch_k', 0.02256887840379211), ('relative_volume', 0.021276919721162888), ('bb_position', 0.01856674239003426), ('macd_hist', 0.01833381777711348), ('momentum_5', 0.018058936795250006)]
+
+  Classification Report:
+    precision    recall  f1-score   support
+    
+            DOWN       0.36      0.42      0.39      1580
+         NEUTRAL       0.37      0.40      0.39      1413
+              UP       0.40      0.32      0.36      1783
+    
+        accuracy                           0.38      4776
+       macro avg       0.38      0.38      0.38      4776
+    weighted avg       0.38      0.38      0.38      4776
+
+  Top-10 Feature Importance:
+    vwap_distance             762.6301
+    sector_id                 740.3505
+    adx                       645.5615
+    volume_ratio              628.2958
+    relative_volume           606.7102
+    bb_width                  606.4532
+    rsi_momentum              605.3383
+    atr_pct                   603.0987
+    trade_intensity           585.1449
+    momentum_5                552.4883
+
+  Confusion Matrix (rows=actual, cols=predicted):
+                     DOWN  NEUTRAL       UP
+            DOWN      659      451      470
+         NEUTRAL      470      568      375
+              UP      710      498      575
+
+======================================================================
+END OF REPORT
+======================================================================

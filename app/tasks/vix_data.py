@@ -1,7 +1,6 @@
 import os
 from datetime import datetime, timedelta
 
-import redis
 import yfinance as yf  # For VIX data (fallback from Alpaca)
 from celery.utils.log import get_task_logger
 
@@ -30,7 +29,7 @@ def collect_vix_data(self, days: int = 7):
     1. yfinance (Primary - 무료, 안정적)
     2. Alpaca IEX (Fallback - 무료 계정은 IEX feed만)
     """
-    logger.info(f"VIX 데이터 수집 시작 (기간: {days}일)")
+    logger.info("VIX 데이터 수집 시작 (기간: %d일)", days)
 
     try:
         # Primary: yfinance (no subscription required)
@@ -52,11 +51,11 @@ def collect_vix_data(self, days: int = 7):
             latest_vix_value = float(vix_df['Close'].iloc[-1])
             latest_vix_time = vix_df.index[-1].to_pydatetime()
 
-            logger.info(f"yfinance VIX: {latest_vix_value:.2f} @ {latest_vix_time}")
+            logger.info("yfinance VIX: %.2f @ %s", latest_vix_value, latest_vix_time)
             data_source = 'yfinance'
 
         except Exception as yf_error:
-            logger.warning(f"yfinance 실패: {yf_error}, Alpaca IEX 시도")
+            logger.warning("yfinance 실패: %s, Alpaca IEX 시도", yf_error)
 
             # Fallback: Alpaca IEX
             from alpaca.data.historical import StockHistoricalDataClient
@@ -95,17 +94,13 @@ def collect_vix_data(self, days: int = 7):
             latest_vix_value = float(latest_vix_bar.close)
             latest_vix_time = latest_vix_bar.timestamp
 
-            logger.info(f"Alpaca IEX VIX: {latest_vix_value:.2f}")
+            logger.info("Alpaca IEX VIX: %.2f", latest_vix_value)
             data_source = 'alpaca_iex'
 
         # Store latest VIX in Redis (CRITICAL for regime detection)
         try:
-            redis_client = redis.Redis(
-                host=os.getenv('REDIS_HOST', 'redis'),
-                port=int(os.getenv('REDIS_PORT', 6379)),
-                db=int(os.getenv('REDIS_DB', 0)),
-                decode_responses=True
-            )
+            from app.core.cache import get_shared_redis
+            redis_client = get_shared_redis()
 
             redis_client.setex(
                 'vix:latest',
@@ -119,10 +114,10 @@ def collect_vix_data(self, days: int = 7):
                 latest_vix_time.isoformat()
             )
 
-            logger.info(f"Redis VIX 캐시: {latest_vix_value:.2f} (source: {data_source})")
+            logger.info("Redis VIX 캐시: %.2f (source: %s)", latest_vix_value, data_source)
 
         except Exception as redis_err:
-            logger.error(f"Redis VIX 캐시 실패: {redis_err}")
+            logger.error("Redis VIX 캐시 실패: %s", redis_err)
             raise  # Redis 실패는 재시도
 
         return {
@@ -133,7 +128,7 @@ def collect_vix_data(self, days: int = 7):
         }
 
     except Exception as e:
-        logger.error(f"VIX 수집 최종 실패: {e}", exc_info=True)
+        logger.error("VIX 수집 최종 실패: %s", e, exc_info=True)
         raise self.retry(exc=e, countdown=300)  # 5분 후 재시도
 
 
@@ -145,12 +140,8 @@ def get_latest_vix() -> float | None:
         최신 VIX 값 또는 없을 경우 None
     """
     try:
-        redis_client = redis.Redis(
-            host=os.getenv('REDIS_HOST', 'redis'),
-            port=int(os.getenv('REDIS_PORT', 6379)),
-            db=int(os.getenv('REDIS_DB', 0)),
-            decode_responses=True
-        )
+        from app.core.cache import get_shared_redis
+        redis_client = get_shared_redis()
 
         vix_str = redis_client.get('vix:latest')  # Changed to match key name
 
@@ -161,5 +152,5 @@ def get_latest_vix() -> float | None:
             return None
 
     except Exception as e:
-        logger.error(f"Failed to get VIX from Redis: {e}")
+        logger.error("Failed to get VIX from Redis: %s", e)
         return None

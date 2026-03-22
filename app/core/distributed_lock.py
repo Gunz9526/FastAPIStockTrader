@@ -38,8 +38,6 @@ import time
 
 from redis import Redis
 
-from app.core.config import settings
-
 logger = logging.getLogger(__name__)
 
 
@@ -89,11 +87,10 @@ class DistributedLock:
         self._connect()
 
     def _connect(self) -> None:
-        """Establish Redis connection."""
+        """Establish Redis connection using shared pool."""
         try:
-            redis_url = str(settings.REDIS_URL)
-            self._redis = Redis.from_url(redis_url, decode_responses=True)
-            # Test connection
+            from app.core.cache import get_shared_redis
+            self._redis = get_shared_redis()
             self._redis.ping()
         except Exception as e:
             logger.error("Redis connection failed: %s", str(e))

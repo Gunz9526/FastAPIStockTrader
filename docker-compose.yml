@@ -17,8 +17,11 @@ services:
 
   redis:
     image: redis:7-alpine
+    command: redis-server --appendonly yes
     ports:
       - "6379:6379"
+    volumes:
+      - redis_data:/data
 
   app:
     build: .
@@ -110,21 +113,22 @@ services:
       - prometheus
     restart: unless-stopped
 
-  flower:
-    image: mher/flower
-    ports:
-      - "5555:5555"
-    environment:
-      - CELERY_BROKER_URL=${REDIS_URL}
-      - FLOWER_PORT=5555
-      - FLOWER_UNAUTHENTICATED_API=true
-    depends_on:
-      - redis
-      - worker-trading
-      - worker-data
-      - worker-training
-    restart: unless-stopped
+  # flower:
+  #   image: mher/flower
+  #   ports:
+  #     - "5555:5555"
+  #   environment:
+  #     - CELERY_BROKER_URL=${REDIS_URL}
+  #     - FLOWER_PORT=5555
+  #     - FLOWER_UNAUTHENTICATED_API=true
+  #   depends_on:
+  #     - redis
+  #     - worker-trading
+  #     - worker-data
+  #     - worker-training
+  #   restart: unless-stopped
 
 volumes:
   postgres_data:
   grafana_data:
+  redis_data:

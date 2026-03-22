@@ -40,20 +40,16 @@ class SentimentAnalyzer:
         self._init_gemini()
         self.cache_ttl = 3600  # 1 hour
 
-    def _init_redis(self) -> redis.Redis:
-        """Redis 연결 초기화"""
+    def _init_redis(self) -> redis.Redis | None:
+        """Redis 연결 초기화 (shared pool 사용)"""
         try:
-            client = redis.Redis(
-                host=settings.REDIS_HOST,
-                port=settings.REDIS_PORT,
-                db=settings.REDIS_DB,
-                decode_responses=True
-            )
+            from app.core.cache import get_shared_redis
+            client = get_shared_redis()
             client.ping()
             logger.info("감성 캐싱용 Redis 연결됨")
             return client
         except Exception as e:
-            logger.warning(f"Redis 연결 실패: {e}. 캐시 사용 중지.")
+            logger.warning("Redis 연결 실패: %s. 캐시 사용 중지.", e)
             return None
 
     def _init_gemini(self):

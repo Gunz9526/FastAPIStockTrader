@@ -53,6 +53,7 @@ celery_app.conf.update(
         "app.tasks.trading.update_trailing_stops": {"queue": "trading"},
         "app.tasks.trading.generate_daily_signals": {"queue": "trading"},
         "app.tasks.trading.execute_intraday_entries": {"queue": "trading"},  # Phase L.2c
+        "app.tasks.trading.send_end_of_day_summary": {"queue": "trading"},  # Phase R.3
         "app.tasks.portfolio.rebalance_portfolio": {"queue": "trading"},
         "app.tasks.portfolio.update_portfolio_parameters": {"queue": "trading"},
         # MEDIUM PRIORITY: Data collection (< 60s latency tolerance)
@@ -142,20 +143,24 @@ celery_app.conf.beat_schedule = {
         "schedule": crontab(minute="45", hour="15", day_of_week="1-5"),
     },
 
-    # Sentiment Analysis Update (Twice daily: pre-market + mid-session)
-    # Fetches news from API, analyzes with Gemini, caches in Redis
-    # Reduced from 7x/day → 2x/day: sentiment is confidence adjuster (15% weight), not ML feature
-    "update_sentiment_scores": {
-        "task": "app.tasks.sentiment.update_sentiment_scores",
-        "schedule": crontab(minute="0", hour="8,12", day_of_week="1-5"),
+    # End-of-Day Discord Summary (4:05 PM EST, 5 min after close)
+    # Sends portfolio value, daily P&L, positions, top/worst performer
+    "send_end_of_day_summary": {
+        "task": "app.tasks.trading.send_end_of_day_summary",
+        "schedule": crontab(minute="5", hour="16", day_of_week="1-5"),
     },
 
-    # Daily Sentiment Cache Cleanup (Midnight EST)
-    # Optional: Redis TTL handles expiration automatically
-    "clear_stale_sentiment_cache": {
-        "task": "app.tasks.sentiment.clear_stale_sentiment_cache",
-        "schedule": crontab(minute="0", hour="0"),  # Daily at midnight
-    },
+    # Deactivated: sentiment weight=0 (Session 33). Uncomment to re-enable.
+    # "update_sentiment_scores": {
+    #     "task": "app.tasks.sentiment.update_sentiment_scores",
+    #     "schedule": crontab(minute="0", hour="8,12", day_of_week="1-5"),
+    # },
+
+    # Deactivated: sentiment weight=0 (Session 33). Uncomment to re-enable.
+    # "clear_stale_sentiment_cache": {
+    #     "task": "app.tasks.sentiment.clear_stale_sentiment_cache",
+    #     "schedule": crontab(minute="0", hour="0"),  # Daily at midnight
+    # },
 
     # Daily Data Collection (6:00 AM EST before market open)
     "daily_data_collection": {

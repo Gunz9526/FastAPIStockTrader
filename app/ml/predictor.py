@@ -152,7 +152,7 @@ class PredictorService:
         """Atomically reload all regime models from disk.
 
         Models are first loaded into a temporary dict **outside** the lock so
-        that concurrent ``predict_next`` calls continue to use the previous
+        that concurrent ``predict_class`` calls continue to use the previous
         (valid) model set.  The swap is performed under the lock.
         """
         logger.info("Reloading regime models from disk...")
@@ -257,78 +257,6 @@ class PredictorService:
             return float(prediction[0])
         except Exception:
             return 0.0
-
-    def predict_next(
-        self,
-        features: pd.DataFrame,
-        regime: MarketRegime = MarketRegime.SIDEWAYS_CALM,
-    ) -> float:
-        """Predict next value using the regime-aware ensemble model.
-
-        Args:
-            features: Feature DataFrame (single row or multiple) with column
-                names matching the trained model's feature set.
-            regime: Current market regime.
-
-        Returns:
-            Prediction value between 0.0 and 1.0.  Returns 0.5 (neutral) on
-            error or when no model is available.
-        """
-        # Grab a reference under lock — subsequent work is lock-free.
-        with self._lock:
-            model = self._models.get(regime)
-
-        if model is None:
-            # Try fallback chain before returning neutral
-            fallback_chain = _REGIME_FALLBACK_CHAIN.get(regime, [])
-            for fallback_regime in fallback_chain:
-                with self._lock:
-                    model = self._models.get(fallback_regime)
-                if model is not None:
-                    logger.warning(
-                        "No model for %s, falling back to %s",
-                        regime.value,
-                        fallback_regime.value,
-                    )
-                    break
-
-            if model is None:
-                logger.warning("No model for regime %s (no fallback available), returning neutral", regime.value)
-                return 0.5
-
-        try:
-            # Ensure DataFrame format with column names (XGBoost requirement)
-            if not isinstance(features, pd.DataFrame):
-                logger.warning("Features not DataFrame, converting...")
-                feature_names = (
-                    model.model.feature_names_in_
-                    if hasattr(model.model, "feature_names_in_")
-                    else None
-                )
-                if feature_names is not None:
-                    features = pd.DataFrame(features, columns=feature_names)
-                else:
-                    logger.error(
-                        "Cannot convert to DataFrame: no feature names available"
-                    )
-                    return 0.5
-
-            logger.debug(
-                "Features type: %s, columns: %s, shape: %s",
-                type(features),
-                list(features.columns) if isinstance(features, pd.DataFrame) else "N/A",
-                features.shape,
-            )
-
-            prediction = model.predict(features)
-            if isinstance(prediction, pd.Series):
-                return float(prediction.iloc[0])
-            return float(prediction[0])
-        except Exception as e:
-            logger.error(
-                "Prediction error for regime %s: %s", regime.value, e, exc_info=True
-            )
-            return 0.5
 
     def retrain(
         self,

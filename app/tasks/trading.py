@@ -172,6 +172,32 @@ def update_trailing_stops(self):
                     realized_pl = (current_price - pos.entry_price) * pos.quantity
                     repo.update_position_exit(pos.id, current_price)
                     risk.record_position_exit(pos.symbol)
+
+                    # 일일 거래 기록 (Redis 영속화)
+                    risk.record_trade(
+                        pos.symbol, "SELL", current_price, pos.quantity,
+                        realized_pl=realized_pl,
+                    )
+
+                    # Discord 알림 (best-effort)
+                    try:
+                        from app.services.discord_notifier import discord_notifier
+                        discord_notifier.send_trade_alert(
+                            action="SELL",
+                            symbol=pos.symbol,
+                            qty=pos.quantity,
+                            price=current_price,
+                            extra_info={
+                                "Type": "TRAILING_STOP_EXIT",
+                                "Reason": reason,
+                            },
+                            pnl_amount=realized_pl,
+                            pnl_pct=((current_price - pos.entry_price) / pos.entry_price) if pos.entry_price else None,
+                            hold_duration_hours=((datetime.now(UTC) - pos.entry_time).total_seconds() / 3600) if hasattr(pos, 'entry_time') and pos.entry_time else None,
+                        )
+                    except Exception:
+                        logger.debug("Discord notification failed for trailing stop exit", exc_info=True)
+
                     logger.info(
                         "포지션 종료: %s | 사유: %s | 실현 P&L: $%.2f",
                         pos.symbol, reason, realized_pl,
@@ -518,3 +544,128 @@ def execute_intraday_entries(self):
         raise
     finally:
         session.close()
+
+
+@celery_app.task(
+    name="app.tasks.trading.send_end_of_day_summary",
+    bind=True,
+    max_retries=2,
+    autoretry_for=(Exception,),
+    retry_backoff=30,
+    retry_backoff_max=300,
+)
+@notify_on_failure("send_end_of_day_summary")
+def send_end_of_day_summary(self):
+    """Post-market daily summary sent to Discord (Phase R.3).
+
+    Workflow:
+        1. Weekend/holiday guard
+        2. Query Alpaca account for portfolio value + daily P&L
+        3. Get active positions and find top/worst performers
+        4. Read Redis trade count for today
+        5. Detect current market regime
+        6. Send structured summary via Discord webhook
+
+    Schedule: 16:05 ET (Mon-Fri), 5 minutes after market close.
+    """
+    from datetime import date, datetime
+
+    from pytz import timezone
+
+    et_tz = timezone("America/New_York")
+    current_time = datetime.now(et_tz)
+
+    # Weekend guard
+    if current_time.weekday() > 4:
+        logger.info("주말 — 일일 요약 건너뛰기")
+        return {"status": "skipped", "reason": "weekend"}
+
+    logger.info("===== 장마감 일일 요약 생성 시작 =====")
+
+    try:
+        from alpaca.trading.client import TradingClient
+
+        from app.core.cache import cache
+        from app.core.config import settings
+        from app.services.discord_notifier import discord_notifier
+
+        # 1. Alpaca account info
+        is_paper = "paper" in settings.ALPACA_TRADING_URL.lower()
+        api = TradingClient(
+            api_key=settings.ALPACA_API_KEY,
+            secret_key=settings.ALPACA_SECRET_KEY,
+            paper=is_paper,
+        )
+
+        account = api.get_account()
+        portfolio_value = float(account.portfolio_value)
+
+        # Daily P&L from equity change
+        last_equity = float(account.last_equity)
+        daily_pnl = portfolio_value - last_equity
+        daily_pnl_pct = (daily_pnl / last_equity) if last_equity > 0 else 0.0
+
+        # 2. Active positions
+        positions = api.get_all_positions()
+        total_positions = len(positions)
+
+        # Find top/worst performers
+        top_performer = None
+        worst_performer = None
+        if positions:
+            best_pos = max(positions, key=lambda p: float(p.unrealized_plpc))
+            worst_pos = min(positions, key=lambda p: float(p.unrealized_plpc))
+            top_performer = f"{best_pos.symbol} ({float(best_pos.unrealized_plpc):+.2%})"
+            worst_performer = f"{worst_pos.symbol} ({float(worst_pos.unrealized_plpc):+.2%})"
+
+        # 3. Redis trade count
+        today_str = date.today().isoformat()
+        trades_today = 0
+        try:
+            raw = cache.get(f"risk:daily_trades:{today_str}")
+            if raw is not None:
+                trades_today = int(raw)
+        except Exception:
+            logger.debug("Redis trade count read failed")
+
+        # 4. Current regime
+        regime = None
+        try:
+            raw_regime = cache.get("regime:current")
+            if raw_regime:
+                regime = str(raw_regime)
+        except Exception:
+            logger.debug("Redis regime read failed")
+
+        # 5. Send Discord summary
+        success = discord_notifier.send_daily_summary(
+            portfolio_value=portfolio_value,
+            daily_pnl=daily_pnl,
+            daily_pnl_pct=daily_pnl_pct,
+            total_positions=total_positions,
+            trades_today=trades_today,
+            regime=regime,
+            top_performer=top_performer,
+            worst_performer=worst_performer,
+        )
+
+        logger.info(
+            "일일 요약 전송 %s: 포트폴리오=$%s, P&L=$%s (%s), 포지션=%d, 거래=%d",
+            "성공" if success else "실패",
+            f"{portfolio_value:,.2f}",
+            f"{daily_pnl:+,.2f}",
+            f"{daily_pnl_pct:+.2%}",
+            total_positions,
+            trades_today,
+        )
+
+        return {
+            "status": "success",
+            "portfolio_value": portfolio_value,
+            "daily_pnl": daily_pnl,
+            "trades_today": trades_today,
+        }
+
+    except Exception as e:
+        logger.error("일일 요약 생성 오류: %s", str(e), exc_info=True)
+        raise

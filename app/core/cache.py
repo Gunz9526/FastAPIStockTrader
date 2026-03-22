@@ -128,3 +128,32 @@ class CacheService:
 
 # Global cache instance
 cache = CacheService()
+
+
+# Shared sync Redis client (lazy singleton)
+_shared_redis_client: redis.Redis | None = None
+
+
+def get_shared_redis() -> redis.Redis:
+    """
+    Return a shared synchronous Redis client instance.
+
+    Uses the same connection URL as CacheService. All modules that need
+    direct Redis access (VIX cache, sentiment cache, distributed locks)
+    should use this instead of creating their own connections.
+
+    Returns:
+        redis.Redis instance with decode_responses=True
+
+    Raises:
+        redis.ConnectionError: If Redis is unreachable
+    """
+    global _shared_redis_client
+    if _shared_redis_client is None:
+        redis_url = str(settings.REDIS_URL) if settings.REDIS_URL else "redis://redis:6379/0"
+        _shared_redis_client = redis.from_url(
+            redis_url,
+            decode_responses=True,
+            socket_connect_timeout=5,
+        )
+    return _shared_redis_client

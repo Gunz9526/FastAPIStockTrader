@@ -22,6 +22,7 @@ class RiskManager:
         min_volume: float = 100000,
         max_trades_per_day: int = 10,
         daily_loss_limit: float = 1000.0,
+        max_daily_buys: int = 2,
         max_portfolio_risk_pct: float = 0.02  # 2% max portfolio risk per trade
     ):
         # Position sizing
@@ -40,6 +41,7 @@ class RiskManager:
         # Daily limits
         self.max_trades_per_day = max_trades_per_day
         self.daily_loss_limit = daily_loss_limit
+        self.max_daily_buys = max_daily_buys
         self.max_portfolio_risk_pct = max_portfolio_risk_pct
 
         # Blacklist
@@ -72,6 +74,8 @@ class RiskManager:
             self.current_date = today
             self.daily_trades[today] = 0
             self.daily_pnl[today] = 0.0
+            if hasattr(self, '_daily_buys'):
+                self._daily_buys[today] = 0
             logger.info("새 거래일 시작: %s", today)
 
     def apply_symbol_filters(self, symbol: str, price: float, volume: float) -> bool:
@@ -130,6 +134,35 @@ class RiskManager:
 
         return True
 
+    def can_buy_today(self) -> bool:
+        """Check if daily BUY limit has been reached (separate from total trade limit).
+
+        Uses Redis key ``risk:daily_buys:{date}`` with in-memory fallback.
+        Default limit: 2 buys per day.
+
+        Returns:
+            True if more buys are allowed today.
+        """
+        self._reset_if_new_day()
+        today_str = date.today().isoformat()
+
+        buy_count = 0
+        try:
+            raw = cache.get(f"risk:daily_buys:{today_str}")
+            if raw is not None:
+                buy_count = int(raw)
+        except Exception:
+            buy_count = getattr(self, '_daily_buys', {}).get(date.today(), 0)
+
+        if buy_count >= self.max_daily_buys:
+            logger.warning(
+                "일일 매수 한도 도달: %d/%d",
+                buy_count, self.max_daily_buys,
+            )
+            return False
+
+        return True
+
     def _increment_daily_trades(self) -> None:
         """Increment daily trade count in both memory and Redis."""
         today = date.today()
@@ -141,6 +174,20 @@ class RiskManager:
             cache.set(key, new_val, ttl_seconds=172800)  # 48h
         except Exception as e:
             logger.debug("Redis daily_trades write failed: %s", e)
+
+    def _increment_daily_buys(self) -> None:
+        """Increment daily BUY count in both memory and Redis."""
+        today = date.today()
+        if not hasattr(self, '_daily_buys'):
+            self._daily_buys: dict[date, int] = defaultdict(int)
+        self._daily_buys[today] = self._daily_buys.get(today, 0) + 1
+        try:
+            key = f"risk:daily_buys:{today.isoformat()}"
+            current = cache.get(key)
+            new_val = (int(current) + 1) if current is not None else 1
+            cache.set(key, new_val, ttl_seconds=172800)  # 48h
+        except Exception as e:
+            logger.debug("Redis daily_buys write failed: %s", e)
 
     def _add_daily_pnl(self, pnl: float) -> None:
         """Add to daily P&L in both memory and Redis."""
@@ -374,6 +421,9 @@ class RiskManager:
         """Record a trade for daily tracking."""
         self._reset_if_new_day()
         self._increment_daily_trades()
+
+        if action == 'BUY':
+            self._increment_daily_buys()
 
         if action == 'SELL' and realized_pl != 0:
             self._add_daily_pnl(realized_pl)

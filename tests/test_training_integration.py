@@ -77,10 +77,10 @@ def mock_feature_engineer():
     """Mock FeatureEngineer with expected behavior."""
     engineer = MagicMock()
 
-    # Mock base_feature_columns (24 features)
+    # Mock base_feature_columns (23 features)
     engineer.base_feature_columns = [
         'rsi', 'macd', 'bb_width', 'atr', 'adx',
-        'ma_5', 'ma_20', 'ema_12', 'ema_26',
+        'ma_5', 'ma_20', 'ema_12',
         'momentum_5', 'momentum_20',
         'volume', 'vwap', 'obv', 'relative_volume',
         'close', 'high', 'low', 'open',
@@ -122,7 +122,7 @@ def mock_feature_engineer():
     engineer.create_features.side_effect = mock_create_features
 
     # Mock extract_feature_vector (returns scaled features)
-    def mock_extract_feature_vector(X, fit_scaler=False, market_avg_volume=None):
+    def mock_extract_feature_vector(X, fit_scaler=False):
         """Return DataFrame as-is (mock scaling)."""
         return X.copy()
 

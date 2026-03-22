@@ -56,7 +56,7 @@ class PortfolioRebalancer:
             portfolio_value = float(account.portfolio_value)
             current_positions = self._get_current_positions()
 
-            logger.info("포트폴리오 가치: $%,.2f", portfolio_value)
+            logger.info("포트폴리오 가치: $%s", f"{portfolio_value:,.2f}")
             logger.info("현재 포지션: %s", current_positions)
 
             # 2. Calculate target weights (MPT optimization)
@@ -99,7 +99,8 @@ class PortfolioRebalancer:
                 current[pos.symbol] = {
                     'qty': int(pos.qty),
                     'market_value': float(pos.market_value),
-                    'avg_entry_price': float(pos.avg_entry_price)
+                    'current_price': float(pos.current_price),
+                    'avg_entry_price': float(pos.avg_entry_price),
                 }
 
             return current
@@ -173,29 +174,39 @@ class PortfolioRebalancer:
                     continue
 
                 if symbol in current_positions:
-                    current_price = current_positions[symbol].get('avg_entry_price', 0.0)
+                    current_price = current_positions[symbol].get('current_price', 0.0)
                     if current_price <= 0:
                         logger.warning("  잘못된 가격 데이터 %s", symbol)
                         continue
+                    qty = int(abs(diff_value) / current_price)
+                    if qty == 0:
+                        logger.info("  %s: 주문 수량 부족", symbol)
+                        continue
+                    side = OrderSide.BUY if diff_value > 0 else OrderSide.SELL
+                    logger.info(
+                        "  %s %s %d주 @ $%.2f", side.name, symbol, qty, current_price,
+                    )
+                    order_data = MarketOrderRequest(
+                        symbol=symbol,
+                        qty=qty,
+                        side=side,
+                        time_in_force=TimeInForce.DAY,
+                    )
                 else:
-                    logger.warning("  신규 심볼 %s에 대한 가격 데이터 없음 — 건너뜀", symbol)
-                    continue
-
-                qty = int(abs(diff_value) / current_price)
-                if qty == 0:
-                    logger.info("  %s: 주문 수량 부족", symbol)
-                    continue
-
-                side = OrderSide.BUY if diff_value > 0 else OrderSide.SELL
-                logger.info(
-                    "  %s %s %d주 @ $%.2f", side.name, symbol, qty, current_price,
-                )
-                order_data = MarketOrderRequest(
-                    symbol=symbol,
-                    qty=qty,
-                    side=side,
-                    time_in_force=TimeInForce.DAY,
-                )
+                    if diff_value <= 0:
+                        logger.info("  %s: 신규 심볼 매도 불가 — 건너뜀", symbol)
+                        continue
+                    side = OrderSide.BUY
+                    notional = round(abs(diff_value), 2)
+                    logger.info(
+                        "  %s %s $%.2f (notional)", side.name, symbol, notional,
+                    )
+                    order_data = MarketOrderRequest(
+                        symbol=symbol,
+                        notional=notional,
+                        side=side,
+                        time_in_force=TimeInForce.DAY,
+                    )
                 order = self.api.submit_order(order_data=order_data)
                 logger.info("  주문 접수: %s", order.id)
 

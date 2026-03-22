@@ -159,6 +159,14 @@ class TradeLog(Base):
     # P&L (for SELL orders)
     realized_pl: Mapped[float | None] = mapped_column(Float, nullable=True)
 
+    # Phase O: Extended P&L tracking
+    fill_price: Mapped[float | None] = mapped_column(Float, nullable=True, comment="Actual Alpaca filled_avg_price")
+    commission: Mapped[float | None] = mapped_column(Float, nullable=True, default=0.0, comment="Trading commission/fees")
+    regime: Mapped[str | None] = mapped_column(String(50), nullable=True, comment="Market regime at trade time")
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True, comment="ML prediction confidence")
+    predicted_class: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="ML predicted class (0/1/2)")
+    entry_trade_id: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="FK to BUY trade for SELL orders")
+
     ticker: Mapped[StockTicker] = relationship(back_populates="trade_logs")
 
 class PositionTracking(Base):

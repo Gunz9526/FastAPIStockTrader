@@ -37,7 +37,7 @@ Design, implement, and validate trading strategies and machine learning models f
 Before marking task complete:
 1. No look-ahead bias in feature engineering
 2. Walk-Forward validation implemented correctly
-5. Feature count matches between training and inference (26 base features)
+3. Feature count matches between training and inference (26 base features)
 4. Proper handling of NaN/inf values in features
 5. Model artifacts saved with version info
 6. Performance metrics logged (Sharpe, accuracy, etc.)

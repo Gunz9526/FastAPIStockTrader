@@ -48,6 +48,9 @@ class MLStrategy(bt.Strategy):
     params = (
         ("risk_per_trade", 0.10),  # Fallback fraction of cash per trade
         ("regime_aware", True),     # Use regime-specific thresholds & model
+        ("symbol", ""),
+        ("trailing_atr_mult", 1.5),  # Matches production risk_manager
+        ("stop_loss_atr_mult", 2.0),  # Matches production risk_manager
     )
 
     # ------------------------------------------------------------------
@@ -69,6 +72,11 @@ class MLStrategy(bt.Strategy):
         # Minimum-hold tracking (bar index of entry)
         self.entry_bar: int = 0
         self.bar_executed: int = 0
+
+        # Risk management: ATR-based stops (production parity)
+        self.trailing_stop: float | None = None
+        self.stop_loss: float | None = None
+        self.last_atr: float = 0.0
 
     # ------------------------------------------------------------------
     # Helpers
@@ -97,12 +105,25 @@ class MLStrategy(bt.Strategy):
                 self.buyprice = order.executed.price
                 self.buycomm = order.executed.comm
                 self.entry_bar = len(self)
+
+                # Set initial stops (ATR-based, matching production risk_manager)
+                if self.last_atr > 0:
+                    self.stop_loss = order.executed.price - self.params.stop_loss_atr_mult * self.last_atr
+                    self.trailing_stop = order.executed.price - self.params.trailing_atr_mult * self.last_atr
+                else:
+                    # Fallback: percentage-based when ATR unavailable
+                    self.stop_loss = order.executed.price * 0.90
+                    self.trailing_stop = order.executed.price * 0.985
             else:
                 self.log(
                     f"SELL EXECUTED, Price: {order.executed.price:.2f}, "
                     f"Cost: {order.executed.value:.2f}, "
                     f"Comm: {order.executed.comm:.2f}"
                 )
+
+                # Reset stops on position exit
+                self.trailing_stop = None
+                self.stop_loss = None
 
             self.bar_executed = len(self)
 
@@ -116,6 +137,11 @@ class MLStrategy(bt.Strategy):
             return
         self.log(f"OPERATION PROFIT, GROSS {trade.pnl:.2f}, NET {trade.pnlcomm:.2f}")
 
+    def stop(self) -> None:
+        """Log end-of-test state for diagnostics."""
+        if self.position:
+            self.log("END-OF-TEST: WARNING — position still open after force-close")
+
     # ------------------------------------------------------------------
     # Core logic
     # ------------------------------------------------------------------
@@ -125,6 +151,15 @@ class MLStrategy(bt.Strategy):
         if self.order:
             return
 
+        # Force close open position on SECOND-TO-LAST bar so the order
+        # fills on the final bar.  Calling self.close() on the very last bar
+        # creates an order that would need bar N+1 to fill, which does not
+        # exist — leaving the position open and trades uncounted.
+        if len(self) >= self.datas[0].buflen() - 1 and self.position:
+            self.log("END-OF-TEST: closing open position (penultimate bar)")
+            self.order = self.close()
+            return
+
         try:
             self._process_bar()
         except Exception as exc:
@@ -132,7 +167,7 @@ class MLStrategy(bt.Strategy):
 
     def _process_bar(self) -> None:
         """Internal: build features, predict, and act."""
-        lookback = 60
+        lookback = 120
         if len(self) < lookback:
             return
 
@@ -153,10 +188,19 @@ class MLStrategy(bt.Strategy):
         df["date_time"] = dates
         df.set_index("date_time", inplace=True)
 
+        # Add symbol for sector_id lookup (avoid Unknown=12 default)
+        if self.params.symbol:
+            df['symbol'] = self.params.symbol
+
         # ----- 2. Feature engineering -----
         features_df = self.feature_engineer.create_features(df)
         if features_df.empty:
             return
+
+        # Store current ATR for stop calculations
+        current_atr = features_df.iloc[-1].get("atr", None)
+        if current_atr is not None and current_atr > 0:
+            self.last_atr = float(current_atr)
 
         # ----- 3. Regime detection -----
         if self.params.regime_aware:
@@ -199,7 +243,34 @@ class MLStrategy(bt.Strategy):
                     )
                     self.order = self.buy(size=size)
         else:
-            # --- SELL: predicted DOWN with sufficient confidence + hold guard ---
+            # --- Risk Management: Stop Checks (before ML signal) ---
+            current_close = self.dataclose[0]
+
+            # 1. Hard stop-loss
+            if self.stop_loss is not None and current_close <= self.stop_loss:
+                self.log(
+                    f"STOP-LOSS HIT, {current_close:.2f} "
+                    f"(stop={self.stop_loss:.2f}, entry={self.buyprice:.2f})"
+                )
+                self.order = self.close()
+                return
+
+            # 2. Update trailing stop (ratchet up only)
+            if self.trailing_stop is not None and self.last_atr > 0:
+                new_trail = current_close - self.params.trailing_atr_mult * self.last_atr
+                if new_trail > self.trailing_stop:
+                    self.trailing_stop = new_trail
+
+            # 3. Trailing stop check
+            if self.trailing_stop is not None and current_close <= self.trailing_stop:
+                self.log(
+                    f"TRAILING STOP HIT, {current_close:.2f} "
+                    f"(trail={self.trailing_stop:.2f}, entry={self.buyprice:.2f})"
+                )
+                self.order = self.close()
+                return
+
+            # --- ML Signal: SELL on DOWN prediction ---
             bars_held = len(self) - self.entry_bar
             if bars_held < min_hold_days:
                 return

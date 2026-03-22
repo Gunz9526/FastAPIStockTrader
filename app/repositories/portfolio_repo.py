@@ -79,11 +79,12 @@ class PortfolioRepository:
                 'daily_return': row.daily_return
             } for row in rows])
 
-            logger.info(f"Retrieved {len(df)} days of P&L data")
+            logger.info("Retrieved %d days of P&L data", len(df))
             return df
 
         except Exception as e:
-            logger.error(f"Failed to get daily P&L: {e}", exc_info=True)
+            logger.error("Failed to get daily P&L: %s", e, exc_info=True)
+            self.session.rollback()
             return pd.DataFrame(columns=['date', 'daily_return'])
 
     def get_trade_history(
@@ -142,11 +143,12 @@ class PortfolioRepository:
                     'pnl': pnl
                 })
 
-            logger.info(f"Retrieved {len(trades)} trades for {symbol}")
+            logger.info("Retrieved %d trades for %s", len(trades), symbol)
             return trades
 
         except Exception as e:
-            logger.error(f"Failed to get trade history for {symbol}: {e}", exc_info=True)
+            logger.error("Failed to get trade history for %s: %s", symbol, e, exc_info=True)
+            self.session.rollback()
             return []
 
     def count_live_trades(self, days: int = 14) -> int:
@@ -178,6 +180,7 @@ class PortfolioRepository:
 
         except Exception as e:
             logger.error("Failed to count live trades: %s", e, exc_info=True)
+            self.session.rollback()
             return 0
 
     def get_all_active_positions(self) -> list[dict]:
@@ -216,6 +219,7 @@ class PortfolioRepository:
 
         except Exception as e:
             logger.error("Failed to get active positions: %s", e, exc_info=True)
+            self.session.rollback()
             return []
 
     def get_ohlcv_range(
@@ -258,6 +262,7 @@ class PortfolioRepository:
 
         except Exception as e:
             logger.error("Failed to get OHLCV for %s: %s", symbol, e, exc_info=True)
+            self.session.rollback()
             return []
 
     def get_portfolio_value(self) -> float:

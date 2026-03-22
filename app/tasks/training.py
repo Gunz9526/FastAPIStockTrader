@@ -34,14 +34,55 @@ MODEL_SAVE_PATH = "model_artifacts"
 # Returns above +THRESHOLD → UP(2), below -THRESHOLD → DOWN(0), else NEUTRAL(1)
 CLASSIFICATION_THRESHOLD = 0.005  # ±0.5% daily — wider NEUTRAL band to reduce noise trades
 
-# Regime-specific class weight overrides
-# Addresses: Weight oscillation stabilization — symmetric DOWN/UP for bear, moderate NEUTRAL boost
-REGIME_CLASS_WEIGHTS: dict[str, dict[int, float]] = {
-    "bull_trending":      {0: 1.2, 1: 1.0, 2: 1.0},  # Balanced (recall: D35%/N49%/U32%)
-    "bear_trending":      {0: 1.2, 1: 2.0, 2: 1.2},  # Symmetric D/U, NEUTRAL boost (66 samples, target recall ~25%)
-    "sideways_volatile":  {0: 1.2, 1: 1.3, 2: 1.0},  # No change (insufficient data)
-    "sideways_calm":      {0: 1.2, 1: 1.2, 2: 1.1},  # No change (stable)
+# Fallback class weights — used only when auto-computation fails (e.g., missing class).
+# Primary weights are now auto-computed from data distribution via _compute_class_weights().
+_REGIME_CLASS_WEIGHTS_FALLBACK: dict[str, dict[int, float]] = {
+    "bull_trending":      {0: 1.2, 1: 1.0, 2: 1.0},
+    "bear_trending":      {0: 2.5, 1: 1.5, 2: 0.8},
+    "sideways_volatile":  {0: 1.2, 1: 1.3, 2: 1.0},
+    "sideways_calm":      {0: 1.2, 1: 1.2, 2: 1.1},
 }
+
+
+def _compute_class_weights(
+    y: pd.Series,
+    damping: float = 0.5,
+    min_weight: float = 0.5,
+    max_weight: float = 3.0,
+) -> dict[int, float]:
+    """Compute balanced class weights from label distribution.
+
+    Uses sklearn's balanced formula: n_samples / (n_classes * n_class_samples),
+    then damps toward uniform to avoid extreme weights on small regimes.
+
+    Args:
+        y: Target labels (0=DOWN, 1=NEUTRAL, 2=UP).
+        damping: Interpolation factor — 0.0 = uniform (all 1.0),
+                 1.0 = fully balanced. Default 0.5 (moderate).
+        min_weight: Minimum allowed weight per class.
+        max_weight: Maximum allowed weight per class.
+
+    Returns:
+        Dict mapping class_id (0, 1, 2) to weight.
+    """
+    try:
+        from sklearn.utils.class_weight import compute_class_weight
+
+        all_classes = np.array([0, 1, 2])
+
+        # Compute balanced weights
+        balanced = compute_class_weight('balanced', classes=all_classes, y=y.values)
+
+        # Damping: lerp between uniform (1.0) and fully balanced
+        damped = 1.0 + damping * (balanced - 1.0)
+
+        # Clip to safe range
+        clipped = np.clip(damped, min_weight, max_weight)
+
+        return {i: round(float(clipped[i]), 2) for i in range(len(all_classes))}
+    except Exception:
+        logger.warning("Class weight computation failed, using uniform weights")
+        return {0: 1.0, 1: 1.0, 2: 1.0}
 
 
 def _load_and_prepare_data(
@@ -77,7 +118,7 @@ def _load_and_prepare_data(
         try:
             ohlcv = repo.get_ohlcv_range(symbol, start_date, end_date)
             if len(ohlcv) < 100:
-                logger.warning(f"{symbol}: Insufficient data ({len(ohlcv)} bars)")
+                logger.warning("%s: Insufficient data (%d bars)", symbol, len(ohlcv))
                 continue
 
             df = pd.DataFrame([{
@@ -99,7 +140,7 @@ def _load_and_prepare_data(
             # Feature engineering
             features_df = feature_engineer.create_features(df)
             if features_df.empty:
-                logger.warning(f"{symbol}: Feature engineering failed")
+                logger.warning("%s: Feature engineering failed", symbol)
                 continue
 
             # Target: Ternary classification (daily return)
@@ -112,43 +153,32 @@ def _load_and_prepare_data(
             features_df.dropna(inplace=True)
             features_df['target'] = features_df['target'].astype(int)
 
-            # Add relative_volume (market-relative volume) — rolling to avoid look-ahead bias
-            if 'volume' in features_df.columns:
-                # Use expanding mean: each bar uses only past + current volume
-                expanding_avg = features_df['volume'].expanding(min_periods=1).mean()
-                features_df['relative_volume'] = features_df['volume'] / expanding_avg
-                # Handle edge case: first bar would be 1.0 (volume / volume)
-                features_df['relative_volume'] = features_df['relative_volume'].fillna(1.0)
-            else:
-                features_df['relative_volume'] = 1.0
-
             # Verify all required features are present
             missing_features = [f for f in feature_engineer.base_feature_columns if f not in features_df.columns]
             if missing_features:
-                logger.error(f"{symbol}: Missing features: {missing_features}")
+                logger.error("%s: Missing features: %s", symbol, missing_features)
                 continue
 
             all_X.append(features_df[feature_engineer.base_feature_columns])
             all_y.append(features_df['target'])
             successful_symbols.append(symbol)
 
-            logger.info(f"{symbol}: {len(features_df)} samples loaded")
+            logger.info("%s: %d samples loaded", symbol, len(features_df))
 
         except Exception as e:
-            logger.error(f"Failed to load {symbol}: {e}")
+            logger.error("Failed to load %s: %s", symbol, e)
             continue
 
     if not all_X:
         logger.error("No data loaded for any symbol")
         return pd.DataFrame(), pd.Series(), []
 
-    # Preserve datetime index instead of resetting to integer
-    X = pd.concat(all_X, ignore_index=False)
-    y = pd.concat(all_y, ignore_index=False)
+    # S.22 Fix: Synthetic rows with sector_id=12 REMOVED.
+    # XGBoost now trains with categories=range(12) (0-11 only).
+    # sector_id=12 (Unknown) is clamped to 0 at both training and prediction.
 
-    # Sort by index to maintain chronological order
-    X = X.sort_index()
-    y = y.sort_index()
+    X = pd.concat(all_X)
+    y = pd.concat(all_y)
 
     if classify_regime:
         logger.info("데이터를 시장 레짐별로 분류 중...")
@@ -189,21 +219,17 @@ def _load_and_prepare_data(
             # SPY 피처 생성 (레짐 감지용)
             spy_features = feature_engineer.create_features(spy_df)
 
-            # Load VIX data from Redis cache for regime detection
-            vix_value = None
-            try:
-                from app.tasks.vix_data import get_latest_vix
-                vix_value = get_latest_vix()
-                if vix_value is not None:
-                    logger.info("VIX 캐시에서 로드: %.2f", vix_value)
-                else:
-                    logger.warning("VIX 캐시 없음 (ATR 기반 레짐 감지 사용)")
-            except Exception as e:
-                logger.debug("VIX 로드 실패: %s", e)
+            # TRAINING NOTE: Do NOT use current VIX for historical regime classification.
+            # Using a single live VIX value across 2 years of data causes look-ahead bias:
+            # if today's VIX > 20, ALL historical dates become sideways_volatile.
+            # Instead, rely solely on ATR-based volatility per SPY bar (atr_pct > 0.03).
+            # Live VIX is correctly used in trading tasks (generate_daily_signals, trading.py)
+            # where only the CURRENT market regime matters.
+            training_vix_value = None  # ATR-only for training
 
             # 시계열별로 rolling window regime 분류 (FIX: 전체 기간 한 번에 분류하던 문제 해결)
             if len(spy_features) >= 50:
-                logger.info("시계열별 rolling window regime 분류 시작...")
+                logger.info("시계열별 rolling window regime 분류 시작 (ATR 기반, VIX 미사용)...")
 
                 # Pre-compute regime for each SPY bar (vectorized approach)
                 # Instead of O(N*M) per-sample detection, compute regime per SPY bar: O(M)
@@ -212,7 +238,7 @@ def _load_and_prepare_data(
                 for i in range(len(spy_features)):
                     if i >= 49:  # Need at least 50 bars
                         window = spy_features.iloc[max(0, i - 199):i + 1]
-                        regime = regime_detector.detect_regime(window, vix_value=vix_value)
+                        regime = regime_detector.detect_regime(window, vix_value=training_vix_value)
                         spy_regimes.append(regime.value)
                     else:
                         spy_regimes.append(MarketRegime.SIDEWAYS_CALM.value)
@@ -351,11 +377,11 @@ def _save_training_report(regime_results: dict, X: pd.DataFrame) -> str:
             f.write("END OF REPORT\n")
             f.write("=" * 70 + "\n")
         
-        logger.info(f"Training report saved to: {report_path}")
+        logger.info("Training report saved to: %s", report_path)
         return report_path
         
     except Exception as e:
-        logger.error(f"Failed to save training report: {e}")
+        logger.error("Failed to save training report: %s", e)
         return ""
 
 
@@ -379,7 +405,7 @@ def train_models(self):
             logger.warning("활성 심볼이 없습니다")
             return
 
-        logger.info(f"{len(symbols)}개 심볼로 학습을 시작합니다")
+        logger.info("%d개 심볼로 학습을 시작합니다", len(symbols))
 
         # 2. Load and prepare data using shared function
         end_date = pd.Timestamp.now(tz='UTC')
@@ -395,9 +421,9 @@ def train_models(self):
 
         # Data size validation (daily bars: 일봉 기준 300개 ≈ 1.2년)
         if len(X) < 300:
-            logger.warning(f"데이터셋이 작습니다: {len(X)} 샘플. 더 긴 백필 또는 심볼 확대를 고려하세요.")
+            logger.warning("데이터셋이 작습니다: %d 샘플. 더 긴 백필 또는 심볼 확대를 고려하세요.", len(X))
 
-        logger.info(f"총 데이터: {len(X)} 샘플, {len(successful_symbols)}개 심볼로부터")
+        logger.info("총 데이터: %d 샘플, %d개 심볼로부터", len(X), len(successful_symbols))
 
         # Phase H.3: 레짐별 모델 학습
         has_regime = 'regime' in X.columns
@@ -417,7 +443,7 @@ def train_models(self):
             logger.warning("Generic model training not implemented. Enable classify_regime=True")
 
     except Exception as e:
-        logger.error(f"Training error: {e}", exc_info=True)
+        logger.error("Training error: %s", e, exc_info=True)
         session.rollback()
         raise
     finally:
@@ -517,22 +543,22 @@ def _train_regime_specific_models(
 
     for regime in MarketRegime:
         regime_value = regime.value
-        logger.info(f"\n{'='*60}")
-        logger.info(f"Training {regime_value.upper()} regime classifier model")
-        logger.info(f"{'='*60}")
+        logger.info("\n" + "="*60)
+        logger.info("Training %s regime classifier model", regime_value.upper())
+        logger.info("="*60)
 
         # Filter data for this regime
         regime_mask = X['regime'] == regime_value
         X_regime = X[regime_mask].drop(columns=['regime'])
         y_regime = y[regime_mask]
 
-        logger.info(f"Regime data: {len(X_regime)} samples ({len(X_regime)/len(X)*100:.1f}% of total)")
+        logger.info("Regime data: %d samples (%.1f%% of total)", len(X_regime), len(X_regime)/len(X)*100)
 
         # Minimum data requirement (daily bars: 500 ≈ 2 years)
         min_samples = 500
         if len(X_regime) < min_samples:
-            logger.warning(f"Insufficient {regime_value} data: {len(X_regime)} < {min_samples} samples")
-            logger.warning(f"Skipping {regime_value} model training (will use generic fallback)")
+            logger.warning("Insufficient %s data: %d < %d samples", regime_value, len(X_regime), min_samples)
+            logger.warning("Skipping %s model training (will use generic fallback)", regime_value)
             holdout_results[regime_value] = {
                 'samples': len(X_regime),
                 'status': 'insufficient_data',
@@ -541,26 +567,26 @@ def _train_regime_specific_models(
 
         # Log class distribution
         class_dist = y_regime.value_counts().to_dict()
-        logger.info(f"  Class distribution: {class_dist}")
+        logger.info("  Class distribution: %s", class_dist)
 
         # Load regime-specific tuning params
         regime_params = _load_regime_params(regime_value)
 
-        # Inject regime-specific class weights (override defaults)
-        regime_weights = REGIME_CLASS_WEIGHTS.get(regime_value)
-        if regime_weights:
-            regime_params.setdefault('catboost', {})
-            regime_params.setdefault('lgbm', {})
-            regime_params.setdefault('xgboost', {})
-            # CatBoost uses list format: [weight_class_0, weight_class_1, weight_class_2]
-            regime_params['catboost']['class_weights'] = [
-                regime_weights[i] for i in range(len(CLASS_NAMES))
-            ]
-            # LightGBM uses dict format: {class_label: weight}
-            regime_params['lgbm']['class_weight'] = regime_weights.copy()
-            # XGBoost uses dict format: {class_label: weight} (converted to sample_weight internally)
-            regime_params['xgboost']['class_weight'] = regime_weights.copy()
-            logger.info(f"  Regime class weights: {regime_weights}")
+        # Compute class weights from data distribution (auto-balanced)
+        regime_weights = _compute_class_weights(y_regime)
+        logger.info("  Auto-computed class weights for %s: %s", regime_value, regime_weights)
+
+        regime_params.setdefault('catboost', {})
+        regime_params.setdefault('lgbm', {})
+        regime_params.setdefault('xgboost', {})
+        # CatBoost uses list format: [weight_class_0, weight_class_1, weight_class_2]
+        regime_params['catboost']['class_weights'] = [
+            regime_weights[i] for i in range(len(CLASS_NAMES))
+        ]
+        # LightGBM uses dict format: {class_label: weight}
+        regime_params['lgbm']['class_weight'] = regime_weights.copy()
+        # XGBoost uses dict format: {class_label: weight} (converted to sample_weight internally)
+        regime_params['xgboost']['class_weight'] = regime_weights.copy()
 
         # --- 1. Holdout split (chronological) ---
         split_idx = int(len(X_regime) * (1 - holdout_ratio))
@@ -569,19 +595,14 @@ def _train_regime_specific_models(
         X_holdout = X_regime.iloc[split_idx:]
         y_holdout = y_regime.iloc[split_idx:]
 
-        market_avg_volume_train = (
-            X_train['volume'].mean() if 'volume' in X_train.columns else None
-        )
-
         # --- 2. Walk-Forward weight calculation on TRAIN portion only ---
         # Build walk-forward models with regime-specific class weights
         cat_wf_params = {}
         lgbm_wf_params = {}
         xgb_wf_params = {}
-        if regime_weights:
-            cat_wf_params['class_weights'] = [regime_weights[i] for i in range(len(CLASS_NAMES))]
-            lgbm_wf_params['class_weight'] = regime_weights.copy()
-            xgb_wf_params['class_weight'] = regime_weights.copy()
+        cat_wf_params['class_weights'] = [regime_weights[i] for i in range(len(CLASS_NAMES))]
+        lgbm_wf_params['class_weight'] = regime_weights.copy()
+        xgb_wf_params['class_weight'] = regime_weights.copy()
         models_to_eval = [
             ('catboost', CatBoostClassifierWrapper(**cat_wf_params)),
             ('lgbm', LGBMClassifierWrapper(**lgbm_wf_params)),
@@ -591,7 +612,7 @@ def _train_regime_specific_models(
         accuracy_scores: list[float] = []
         for name, model in models_to_eval:
             try:
-                logger.info(f"  Walk-Forward classifier {name}...")
+                logger.info("  Walk-Forward classifier %s...", name)
                 tscv = TimeSeriesSplit(n_splits=3)
                 scores: list[float] = []
                 for train_idx, val_idx in tscv.split(X_train):
@@ -602,12 +623,10 @@ def _train_regime_specific_models(
 
                     X_tr = feature_engineer.extract_feature_vector(
                         X_tr_raw, fit_scaler=True,
-                        market_avg_volume=market_avg_volume_train,
                         feature_set="base", scaler_suffix=regime_value,
                     )
                     X_val = feature_engineer.extract_feature_vector(
                         X_val_raw, fit_scaler=False,
-                        market_avg_volume=market_avg_volume_train,
                         feature_set="base", scaler_suffix=regime_value,
                     )
 
@@ -618,25 +637,23 @@ def _train_regime_specific_models(
 
                 avg_acc = sum(scores) / len(scores) if scores else 0.0
                 accuracy_scores.append(max(avg_acc, 0.1))
-                logger.info(f"  {name} | Accuracy: {avg_acc:.4f}")
+                logger.info("  %s | Accuracy: %.4f", name, avg_acc)
             except Exception as e:
-                logger.error(f"  {name} 처리 실패: {e}", exc_info=True)
+                logger.error("  %s 처리 실패: %s", name, e, exc_info=True)
                 accuracy_scores.append(0.1)
 
         total = sum(accuracy_scores)
         weights = [s / total for s in accuracy_scores] if total > 0 else [0.33, 0.33, 0.34]
-        logger.info(f"  Ensemble weights: {[round(w, 3) for w in weights]}")
+        logger.info("  Ensemble weights: %s", [round(w, 3) for w in weights])
 
         # --- 3. Validation ensemble (train → holdout, true OOS) ---
         try:
             X_train_scaled = feature_engineer.extract_feature_vector(
                 X_train, fit_scaler=True,
-                market_avg_volume=market_avg_volume_train,
                 feature_set="base", scaler_suffix=regime_value,
             )
             X_holdout_scaled = feature_engineer.extract_feature_vector(
                 X_holdout, fit_scaler=False,
-                market_avg_volume=market_avg_volume_train,
                 feature_set="base", scaler_suffix=regime_value,
             )
 
@@ -652,7 +669,7 @@ def _train_regime_specific_models(
                 y_holdout.values, predictions,
                 target_names=CLASS_NAMES, zero_division=0,
             )
-            logger.info(f"\n{cls_report_str}")
+            logger.info("\n%s", cls_report_str)
 
             # NEUTRAL recall (class 1)
             neutral_mask = y_holdout.values == 1
@@ -660,12 +677,12 @@ def _train_regime_specific_models(
             neutral_total = neutral_mask.sum()
             neutral_recall = neutral_correct / neutral_total if neutral_total > 0 else 0.0
 
-            logger.info(f"{regime_value} 모델 검증 (True Out-of-Sample):")
-            logger.info(f"  - 학습: {len(X_train)} 샘플, 검증: {len(X_holdout)} 샘플")
-            logger.info(f"  - 정확도: {accuracy:.2%}")
-            logger.info(f"  - F1-Score (weighted): {f1:.4f}")
-            logger.info(f"  - 예측 분포: {pd.Series(predictions).value_counts().to_dict()}")
-            logger.info(f"  - 실제 분포: {y_holdout.value_counts().to_dict()}")
+            logger.info("%s 모델 검증 (True Out-of-Sample):", regime_value)
+            logger.info("  - 학습: %d 샘플, 검증: %d 샘플", len(X_train), len(X_holdout))
+            logger.info("  - 정확도: %.2f%%", accuracy * 100)
+            logger.info("  - F1-Score (weighted): %.4f", f1)
+            logger.info("  - 예측 분포: %s", pd.Series(predictions).value_counts().to_dict())
+            logger.info("  - 실제 분포: %s", y_holdout.value_counts().to_dict())
 
             # Confusion matrix for training report
             conf_matrix = confusion_matrix(y_holdout.values, predictions, labels=[0, 1, 2])
@@ -684,7 +701,7 @@ def _train_regime_specific_models(
                 'status': 'success',
             }
         except Exception as e:
-            logger.error(f"{regime_value} 검증 앙상블 학습 실패: {e}", exc_info=True)
+            logger.error("%s 검증 앙상블 학습 실패: %s", regime_value, e, exc_info=True)
             holdout_results[regime_value] = {
                 'samples': len(X_regime),
                 'status': 'error',
@@ -693,11 +710,8 @@ def _train_regime_specific_models(
 
         # --- 4. Production ensemble (ALL data → save) ---
         try:
-            market_avg_volume = (
-                X_regime['volume'].mean() if 'volume' in X_regime.columns else None
-            )
             X_regime_scaled = feature_engineer.extract_feature_vector(
-                X_regime, fit_scaler=True, market_avg_volume=market_avg_volume,
+                X_regime, fit_scaler=True,
                 feature_set="base", scaler_suffix=regime_value,
             )
             production_ensemble = EnsembleClassifierWrapper(weights=weights, model_params=regime_params)
@@ -715,16 +729,16 @@ def _train_regime_specific_models(
                                 importances[fn] = importances.get(fn, 0.0) + iv / 3.0
                 if importances:
                     sorted_imp = sorted(importances.items(), key=lambda x: x[1], reverse=True)[:10]
-                    logger.info(f"  {regime_value} Top-10 features: {sorted_imp}")
+                    logger.info("  %s Top-10 features: %s", regime_value, sorted_imp)
                     holdout_results[regime_value]['feature_importance_top10'] = sorted_imp
             except Exception as e:
-                logger.debug(f"Feature importance extraction failed: {e}")
+                logger.debug("Feature importance extraction failed: %s", e)
 
             model_filename = f"ensemble_classifier_{regime_value}.pkl"
             model_path = os.path.join(MODEL_SAVE_PATH, model_filename)
             production_ensemble.save(model_path)
 
-            logger.info(f"{regime_value.upper()} production classifier saved: {model_filename}")
+            logger.info("%s production classifier saved: %s", regime_value.upper(), model_filename)
 
             # --- 5. SHAP Feature Importance Analysis (Phase M.2) ---
             try:
@@ -778,8 +792,8 @@ def _train_regime_specific_models(
                         threshold_optimizer = AdaptiveThresholdOptimizer(
                             output_dir=MODEL_SAVE_PATH,
                         )
-                        # θ optimization
-                        regime_cw = REGIME_CLASS_WEIGHTS.get(regime_value)
+                        # θ optimization — auto-compute weights from regime labels
+                        regime_cw = _compute_class_weights(y_regime)
                         theta_res = threshold_optimizer.optimize_classification_threshold(
                             returns=returns_aligned,
                             X=X_aligned,
@@ -824,11 +838,11 @@ def _train_regime_specific_models(
                 logger.debug("  적응형 임계값 최적화 실패 (%s): %s", regime_value, str(e))
 
         except Exception as e:
-            logger.error(f"{regime_value} 프로덕션 모델 학습 실패: {e}", exc_info=True)
+            logger.error("%s 프로덕션 모델 학습 실패: %s", regime_value, e, exc_info=True)
 
-    logger.info(f"\n{'='*60}")
+    logger.info("\n" + "="*60)
     logger.info("Regime-specific classifier training complete")
-    logger.info(f"{'='*60}\n")
+    logger.info("="*60 + "\n")
 
     return holdout_results
 
@@ -872,7 +886,7 @@ def tune_models(self):
             logger.error("No tuning data available")
             return
 
-        logger.info(f"Tuning data: {len(X)} samples from {len(successful_symbols)} symbols")
+        logger.info("Tuning data: %d samples from %d symbols", len(X), len(successful_symbols))
 
         # Check if regime column exists
         has_regime = 'regime' in X.columns
@@ -893,28 +907,27 @@ def tune_models(self):
 
         for regime in MarketRegime:
             regime_value = regime.value
-            logger.info(f"\n{'='*60}")
-            logger.info(f"Tuning for {regime_value.upper()} regime")
-            logger.info(f"{'='*60}")
+            logger.info("\n" + "="*60)
+            logger.info("Tuning for %s regime", regime_value.upper())
+            logger.info("="*60)
 
             # Filter data for this regime
             regime_mask = X['regime'] == regime_value
             X_regime = X[regime_mask].drop(columns=['regime'])
             y_regime = y[regime_mask]
 
-            logger.info(f"Regime data: {len(X_regime)} samples ({len(X_regime)/len(X)*100:.1f}% of total)")
+            logger.info("Regime data: %d samples (%.1f%% of total)", len(X_regime), len(X_regime)/len(X)*100)
 
             # Skip if insufficient data (use 500 as minimum for tuning)
             if len(X_regime) < 500:
-                logger.warning(f"Insufficient {regime_value} data for tuning: {len(X_regime)} < 500")
-                logger.warning(f"Skipping {regime_value} tuning (will use generic params)")
+                logger.warning("Insufficient %s data for tuning: %d < 500", regime_value, len(X_regime))
+                logger.warning("Skipping %s tuning (will use generic params)", regime_value)
                 all_regime_params[regime_value] = None
                 continue
 
             # Scale features
-            market_avg_volume = X_regime['volume'].mean() if 'volume' in X_regime.columns else None
             X_regime_scaled = feature_engineer.extract_feature_vector(
-                X_regime, fit_scaler=True, market_avg_volume=market_avg_volume,
+                X_regime, fit_scaler=True,
                 feature_set="base", scaler_suffix=regime_value
             )
 
@@ -935,7 +948,7 @@ def tune_models(self):
                     **regime_params
                 }, f, indent=2)
 
-            logger.info(f"{regime_value.upper()} params saved: {regime_config_path}")
+            logger.info("%s params saved: %s", regime_value.upper(), regime_config_path)
 
         # Save combined config for backward compatibility
         # Use most common regime (sideways_calm) as default
@@ -959,7 +972,7 @@ def tune_models(self):
 
             logger.info("\n" + "="*60)
             logger.info("Regime-specific tuning complete")
-            logger.info(f"Results saved to {MODEL_SAVE_PATH}/")
+            logger.info("Results saved to %s/", MODEL_SAVE_PATH)
             logger.info("="*60)
         else:
             logger.error("All regime tuning failed. No params saved.")
@@ -967,7 +980,7 @@ def tune_models(self):
         session.commit()
 
     except Exception as e:
-        logger.error(f"Tuning error: {e}", exc_info=True)
+        logger.error("Tuning error: %s", e, exc_info=True)
         session.rollback()
         raise
     finally:
@@ -1053,11 +1066,12 @@ def _tune_regime_models(
 
     # CatBoost Classifier tuning
     logger.info("=" * 60)
-    logger.info(f"[{regime_name.upper()}] CatBoost Classifier Tuning ({n_trials} trials)")
+    logger.info("[%s] CatBoost Classifier Tuning (%d trials)", regime_name.upper(), n_trials)
     logger.info("=" * 60)
 
-    # Get regime-specific class weights for tuning alignment
-    regime_weights = REGIME_CLASS_WEIGHTS.get(regime_name)
+    # Compute class weights from data distribution for tuning alignment
+    regime_weights = _compute_class_weights(y)
+    logger.info("  Auto-computed tuning weights for %s: %s", regime_name, regime_weights)
 
     def catboost_objective(trial):
         params = {
@@ -1068,9 +1082,8 @@ def _tune_regime_models(
             'verbose': False,
             'allow_writing_files': False,
         }
-        # Inject regime-specific class weights for tuning-training alignment
-        if regime_weights:
-            params['class_weights'] = [regime_weights[i] for i in range(len(CLASS_NAMES))]
+        # Inject auto-computed class weights for tuning-training alignment
+        params['class_weights'] = [regime_weights[i] for i in range(len(CLASS_NAMES))]
 
         model = CatBoostClassifierWrapper(**params)
         tscv = TimeSeriesSplit(n_splits=3)
@@ -1103,14 +1116,15 @@ def _tune_regime_models(
                        timeout=timeout, show_progress_bar=False)
     best_catboost = study_cat.best_params
     best_trial_cat = study_cat.best_trial
-    logger.info(f"[{regime_name.upper()}] CatBoost Best Composite: {best_trial_cat.value:.4f} "
-                f"(Acc={best_trial_cat.user_attrs['avg_accuracy']:.2%}, "
-                f"F1={best_trial_cat.user_attrs['avg_f1']:.4f}, "
-                f"Balance={best_trial_cat.user_attrs['avg_balance']:.2f})")
+    logger.info("[%s] CatBoost Best Composite: %.4f (Acc=%.2f%%, F1=%.4f, Balance=%.2f)",
+                regime_name.upper(), best_trial_cat.value,
+                best_trial_cat.user_attrs['avg_accuracy'] * 100,
+                best_trial_cat.user_attrs['avg_f1'],
+                best_trial_cat.user_attrs['avg_balance'])
 
     # LGBM Classifier tuning
     logger.info("=" * 60)
-    logger.info(f"[{regime_name.upper()}] LightGBM Classifier Tuning ({n_trials} trials)")
+    logger.info("[%s] LightGBM Classifier Tuning (%d trials)", regime_name.upper(), n_trials)
     logger.info("=" * 60)
 
     def lgbm_objective(trial):
@@ -1125,9 +1139,8 @@ def _tune_regime_models(
             'reg_lambda': trial.suggest_float('reg_lambda', 0.1, 10),
             'verbose': -1,
         }
-        # Inject regime-specific class weights for tuning-training alignment
-        if regime_weights:
-            params['class_weight'] = regime_weights.copy()
+        # Inject auto-computed class weights for tuning-training alignment
+        params['class_weight'] = regime_weights.copy()
 
         model = LGBMClassifierWrapper(**params)
         tscv = TimeSeriesSplit(n_splits=3)
@@ -1160,14 +1173,15 @@ def _tune_regime_models(
                         timeout=timeout, show_progress_bar=False)
     best_lgbm = study_lgbm.best_params
     best_trial_lgbm = study_lgbm.best_trial
-    logger.info(f"[{regime_name.upper()}] LGBM Best Composite: {best_trial_lgbm.value:.4f} "
-                f"(Acc={best_trial_lgbm.user_attrs['avg_accuracy']:.2%}, "
-                f"F1={best_trial_lgbm.user_attrs['avg_f1']:.4f}, "
-                f"Balance={best_trial_lgbm.user_attrs['avg_balance']:.2f})")
+    logger.info("[%s] LGBM Best Composite: %.4f (Acc=%.2f%%, F1=%.4f, Balance=%.2f)",
+                regime_name.upper(), best_trial_lgbm.value,
+                best_trial_lgbm.user_attrs['avg_accuracy'] * 100,
+                best_trial_lgbm.user_attrs['avg_f1'],
+                best_trial_lgbm.user_attrs['avg_balance'])
 
     # XGBoost Classifier tuning
     logger.info("=" * 60)
-    logger.info(f"[{regime_name.upper()}] XGBoost Classifier Tuning ({n_trials} trials)")
+    logger.info("[%s] XGBoost Classifier Tuning (%d trials)", regime_name.upper(), n_trials)
     logger.info("=" * 60)
 
     def xgb_objective(trial):
@@ -1181,9 +1195,8 @@ def _tune_regime_models(
             'reg_lambda': trial.suggest_float('reg_lambda', 0.1, 10),
             'verbosity': 0,
         }
-        # Inject regime-specific class weights for tuning-training alignment
-        if regime_weights:
-            params['class_weight'] = regime_weights.copy()
+        # Inject auto-computed class weights for tuning-training alignment
+        params['class_weight'] = regime_weights.copy()
 
         model = XGBoostClassifierWrapper(**params)
         tscv = TimeSeriesSplit(n_splits=3)
@@ -1216,10 +1229,11 @@ def _tune_regime_models(
                        timeout=timeout, show_progress_bar=False)
     best_xgb = study_xgb.best_params
     best_trial_xgb = study_xgb.best_trial
-    logger.info(f"[{regime_name.upper()}] XGBoost Best Composite: {best_trial_xgb.value:.4f} "
-                f"(Acc={best_trial_xgb.user_attrs['avg_accuracy']:.2%}, "
-                f"F1={best_trial_xgb.user_attrs['avg_f1']:.4f}, "
-                f"Balance={best_trial_xgb.user_attrs['avg_balance']:.2f})")
+    logger.info("[%s] XGBoost Best Composite: %.4f (Acc=%.2f%%, F1=%.4f, Balance=%.2f)",
+                regime_name.upper(), best_trial_xgb.value,
+                best_trial_xgb.user_attrs['avg_accuracy'] * 100,
+                best_trial_xgb.user_attrs['avg_f1'],
+                best_trial_xgb.user_attrs['avg_balance'])
 
     return {
         'catboost': best_catboost,
@@ -1239,18 +1253,15 @@ def _tune_models_global(
     """
     logger.warning("Performing global tuning (no regime classification)")
 
-    # Calculate market average volume
-    market_avg_volume = X['volume'].mean() if 'volume' in X.columns else None
-
     # Scale features
-    X_scaled = feature_engineer.extract_feature_vector(X, fit_scaler=True, market_avg_volume=market_avg_volume, feature_set="base")
+    X_scaled = feature_engineer.extract_feature_vector(X, fit_scaler=True, feature_set="base")
 
     # CatBoost tuning
     logger.info("=" * 60)
     logger.info("Starting CatBoost Hyperparameter Tuning (100 trials, 3 parallel)")
     logger.info("=" * 60)
     def catboost_objective(trial):
-        logger.info(f"[CatBoost Trial {trial.number + 1}/100] Testing parameters...")
+        logger.info("[CatBoost Trial %d/100] Testing parameters...", trial.number + 1)
         params = {
             'iterations': trial.suggest_int('iterations', 100, 500),
             'depth': trial.suggest_int('depth', 4, 10),
@@ -1281,10 +1292,11 @@ def _tune_models_global(
         trial.set_user_attr('avg_accuracy', sum(fold_accs) / len(fold_accs))
         trial.set_user_attr('avg_f1', sum(fold_f1s) / len(fold_f1s))
         trial.set_user_attr('avg_balance', sum(fold_balances) / len(fold_balances))
-        logger.info(f"[CatBoost Trial {trial.number + 1}/100] Composite: {avg_composite:.4f} "
-                    f"(Acc={trial.user_attrs['avg_accuracy']:.2%}, "
-                    f"F1={trial.user_attrs['avg_f1']:.4f}, "
-                    f"Balance={trial.user_attrs['avg_balance']:.2f})")
+        logger.info("[CatBoost Trial %d/100] Composite: %.4f (Acc=%.2f%%, F1=%.4f, Balance=%.2f)",
+                    trial.number + 1, avg_composite,
+                    trial.user_attrs['avg_accuracy'] * 100,
+                    trial.user_attrs['avg_f1'],
+                    trial.user_attrs['avg_balance'])
         return avg_composite
 
     study_cat = optuna.create_study(
@@ -1295,11 +1307,12 @@ def _tune_models_global(
     best_catboost = study_cat.best_params
     best_trial_cat = study_cat.best_trial
     logger.info("=" * 60)
-    logger.info(f"CatBoost Best Params: {best_catboost}")
-    logger.info(f"CatBoost Best Composite: {best_trial_cat.value:.4f} "
-                f"(Acc={best_trial_cat.user_attrs['avg_accuracy']:.2%}, "
-                f"F1={best_trial_cat.user_attrs['avg_f1']:.4f}, "
-                f"Balance={best_trial_cat.user_attrs['avg_balance']:.2f})")
+    logger.info("CatBoost Best Params: %s", best_catboost)
+    logger.info("CatBoost Best Composite: %.4f (Acc=%.2f%%, F1=%.4f, Balance=%.2f)",
+                best_trial_cat.value,
+                best_trial_cat.user_attrs['avg_accuracy'] * 100,
+                best_trial_cat.user_attrs['avg_f1'],
+                best_trial_cat.user_attrs['avg_balance'])
     logger.info("=" * 60)
 
     # LGBM tuning
@@ -1307,7 +1320,7 @@ def _tune_models_global(
     logger.info("Starting LightGBM Hyperparameter Tuning (100 trials, 3 parallel)")
     logger.info("=" * 60)
     def lgbm_objective(trial):
-        logger.info(f"[LGBM Trial {trial.number + 1}/100] Testing parameters...")
+        logger.info("[LGBM Trial %d/100] Testing parameters...", trial.number + 1)
         params = {
             'n_estimators': trial.suggest_int('n_estimators', 100, 500),
             'max_depth': trial.suggest_int('max_depth', 3, 8),
@@ -1341,10 +1354,11 @@ def _tune_models_global(
         trial.set_user_attr('avg_accuracy', sum(fold_accs) / len(fold_accs))
         trial.set_user_attr('avg_f1', sum(fold_f1s) / len(fold_f1s))
         trial.set_user_attr('avg_balance', sum(fold_balances) / len(fold_balances))
-        logger.info(f"[LGBM Trial {trial.number + 1}/100] Composite: {avg_composite:.4f} "
-                    f"(Acc={trial.user_attrs['avg_accuracy']:.2%}, "
-                    f"F1={trial.user_attrs['avg_f1']:.4f}, "
-                    f"Balance={trial.user_attrs['avg_balance']:.2f})")
+        logger.info("[LGBM Trial %d/100] Composite: %.4f (Acc=%.2f%%, F1=%.4f, Balance=%.2f)",
+                    trial.number + 1, avg_composite,
+                    trial.user_attrs['avg_accuracy'] * 100,
+                    trial.user_attrs['avg_f1'],
+                    trial.user_attrs['avg_balance'])
         return avg_composite
 
     study_lgbm = optuna.create_study(
@@ -1355,11 +1369,12 @@ def _tune_models_global(
     best_lgbm = study_lgbm.best_params
     best_trial_lgbm = study_lgbm.best_trial
     logger.info("=" * 60)
-    logger.info(f"LGBM Best Params: {best_lgbm}")
-    logger.info(f"LGBM Best Composite: {best_trial_lgbm.value:.4f} "
-                f"(Acc={best_trial_lgbm.user_attrs['avg_accuracy']:.2%}, "
-                f"F1={best_trial_lgbm.user_attrs['avg_f1']:.4f}, "
-                f"Balance={best_trial_lgbm.user_attrs['avg_balance']:.2f})")
+    logger.info("LGBM Best Params: %s", best_lgbm)
+    logger.info("LGBM Best Composite: %.4f (Acc=%.2f%%, F1=%.4f, Balance=%.2f)",
+                best_trial_lgbm.value,
+                best_trial_lgbm.user_attrs['avg_accuracy'] * 100,
+                best_trial_lgbm.user_attrs['avg_f1'],
+                best_trial_lgbm.user_attrs['avg_balance'])
     logger.info("=" * 60)
 
     # XGBoost tuning
@@ -1367,7 +1382,7 @@ def _tune_models_global(
     logger.info("Starting XGBoost Hyperparameter Tuning (100 trials, 3 parallel)")
     logger.info("=" * 60)
     def xgb_objective(trial):
-        logger.info(f"[XGBoost Trial {trial.number + 1}/100] Testing parameters...")
+        logger.info("[XGBoost Trial %d/100] Testing parameters...", trial.number + 1)
         params = {
             'n_estimators': trial.suggest_int('n_estimators', 100, 500),
             'max_depth': trial.suggest_int('max_depth', 3, 10),
@@ -1400,10 +1415,11 @@ def _tune_models_global(
         trial.set_user_attr('avg_accuracy', sum(fold_accs) / len(fold_accs))
         trial.set_user_attr('avg_f1', sum(fold_f1s) / len(fold_f1s))
         trial.set_user_attr('avg_balance', sum(fold_balances) / len(fold_balances))
-        logger.info(f"[XGBoost Trial {trial.number + 1}/100] Composite: {avg_composite:.4f} "
-                    f"(Acc={trial.user_attrs['avg_accuracy']:.2%}, "
-                    f"F1={trial.user_attrs['avg_f1']:.4f}, "
-                    f"Balance={trial.user_attrs['avg_balance']:.2f})")
+        logger.info("[XGBoost Trial %d/100] Composite: %.4f (Acc=%.2f%%, F1=%.4f, Balance=%.2f)",
+                    trial.number + 1, avg_composite,
+                    trial.user_attrs['avg_accuracy'] * 100,
+                    trial.user_attrs['avg_f1'],
+                    trial.user_attrs['avg_balance'])
         return avg_composite
 
     study_xgb = optuna.create_study(
@@ -1414,11 +1430,12 @@ def _tune_models_global(
     best_xgb = study_xgb.best_params
     best_trial_xgb = study_xgb.best_trial
     logger.info("=" * 60)
-    logger.info(f"XGBoost Best Params: {best_xgb}")
-    logger.info(f"XGBoost Best Composite: {best_trial_xgb.value:.4f} "
-                f"(Acc={best_trial_xgb.user_attrs['avg_accuracy']:.2%}, "
-                f"F1={best_trial_xgb.user_attrs['avg_f1']:.4f}, "
-                f"Balance={best_trial_xgb.user_attrs['avg_balance']:.2f})")
+    logger.info("XGBoost Best Params: %s", best_xgb)
+    logger.info("XGBoost Best Composite: %.4f (Acc=%.2f%%, F1=%.4f, Balance=%.2f)",
+                best_trial_xgb.value,
+                best_trial_xgb.user_attrs['avg_accuracy'] * 100,
+                best_trial_xgb.user_attrs['avg_f1'],
+                best_trial_xgb.user_attrs['avg_balance'])
     logger.info("=" * 60)
 
     # Save all tuned configs (optimized via composite score: Accuracy + F1 + Balance)
@@ -1451,7 +1468,7 @@ def analyze_feature_importance(self, regime: str = None):
     Returns:
         Dict with feature importance scores and visualization data
     """
-    logger.info(f"Starting feature importance analysis (regime={regime})")
+    logger.info("Starting feature importance analysis (regime=%s)", regime)
 
     try:
         import matplotlib.pyplot as plt
@@ -1464,7 +1481,7 @@ def analyze_feature_importance(self, regime: str = None):
             model_path = f"{MODEL_SAVE_PATH}/ensemble_classifier.pkl"
 
         if not os.path.exists(model_path):
-            logger.error(f"Model not found: {model_path}")
+            logger.error("Model not found: %s", model_path)
             return {'status': 'error', 'message': f'Model not found: {model_path}'}
 
         # Load model
@@ -1474,7 +1491,7 @@ def analyze_feature_importance(self, regime: str = None):
 
         # Check if ensemble model was loaded successfully
         if ensemble.model is None:
-            logger.error(f"앙상블 모델 로드 실패: {model_path}")
+            logger.error("앙상블 모델 로드 실패: %s", model_path)
             return {'status': 'error', 'message': '모델 로드 실패'}
 
         # Validate model structure
@@ -1483,8 +1500,8 @@ def analyze_feature_importance(self, regime: str = None):
             return {'status': 'error', 'message': 'Invalid model structure'}
 
         # Debug: Check estimators_ structure
-        logger.info(f"Number of estimators: {len(ensemble.model.estimators_)}")
-        logger.info(f"Estimator types: {[type(est).__name__ for est in ensemble.model.estimators_]}")
+        logger.info("Number of estimators: %d", len(ensemble.model.estimators_))
+        logger.info("Estimator types: %s", [type(est).__name__ for est in ensemble.model.estimators_])
 
         # Extract feature importance from each base model
         # VotingRegressor.estimators_ is a list of fitted estimators (not tuples)
@@ -1494,7 +1511,7 @@ def analyze_feature_importance(self, regime: str = None):
         model_names = ['catboost', 'lgbm', 'xgboost']
         for model_name, model in zip(model_names, ensemble.model.estimators_):
             if model is None:
-                logger.warning(f"{model_name} estimator is None")
+                logger.warning("%s estimator is None", model_name)
                 continue
 
             # Get feature importance from tree-based model
@@ -1504,9 +1521,9 @@ def analyze_feature_importance(self, regime: str = None):
                     feature_names = model.feature_names_
 
                 importance_scores[model_name] = importances.tolist()
-                logger.info(f"{model_name} feature importances extracted: {len(importances)} features")
+                logger.info("%s feature importances extracted: %d features", model_name, len(importances))
             else:
-                logger.warning(f"{model_name} does not have feature_importances_ attribute")
+                logger.warning("%s does not have feature_importances_ attribute", model_name)
 
         if not importance_scores:
             logger.warning("No feature importances found in models")
@@ -1539,10 +1556,10 @@ def analyze_feature_importance(self, regime: str = None):
 
         # Log top 10 features
         logger.info("\n" + "="*60)
-        logger.info(f"Top 10 Features (Regime: {regime or 'Generic'})")
+        logger.info("Top 10 Features (Regime: %s)", regime or 'Generic')
         logger.info("="*60)
         for idx, row in importance_df.head(10).iterrows():
-            logger.info(f"{row['feature']:20s}: {row['importance']:.4f}")
+            logger.info("%-20s: %.4f", row['feature'], row['importance'])
         logger.info("="*60)
 
         # Save importance plot
@@ -1559,7 +1576,7 @@ def analyze_feature_importance(self, regime: str = None):
         plt.savefig(plot_path, dpi=150, bbox_inches='tight')
         plt.close()
 
-        logger.info(f"Feature importance plot saved: {plot_path}")
+        logger.info("Feature importance plot saved: %s", plot_path)
 
         # Save importance data as JSON
         importance_json = importance_df.to_dict(orient='records')
@@ -1574,7 +1591,7 @@ def analyze_feature_importance(self, regime: str = None):
                 'model_weights': ensemble.weights
             }, f, indent=2)
 
-        logger.info(f"Feature importance data saved: {json_path}")
+        logger.info("Feature importance data saved: %s", json_path)
 
         return {
             'status': 'success',
@@ -1585,7 +1602,7 @@ def analyze_feature_importance(self, regime: str = None):
         }
 
     except Exception as e:
-        logger.error(f"Feature importance analysis failed: {e}", exc_info=True)
+        logger.error("Feature importance analysis failed: %s", e, exc_info=True)
         return {'status': 'error', 'message': str(e)}
 
 
@@ -1768,12 +1785,8 @@ def optimize_thresholds(self) -> dict:
                 continue
 
             # Scale features
-            market_avg_volume = (
-                X_regime['volume'].mean() if 'volume' in X_regime.columns else None
-            )
             X_scaled = feature_engineer.extract_feature_vector(
                 X_regime, fit_scaler=True,
-                market_avg_volume=market_avg_volume,
                 feature_set="base", scaler_suffix=regime_value,
             )
 
@@ -1817,10 +1830,16 @@ def optimize_thresholds(self) -> dict:
 
         # 3. Run optimization
         optimizer = AdaptiveThresholdOptimizer(output_dir=MODEL_SAVE_PATH)
+        # Auto-compute class weights per regime from data distribution
+        auto_weights_by_regime = {}
+        for _regime, (_X, _y_arr, _ret) in data_by_regime.items():
+            auto_weights_by_regime[_regime] = _compute_class_weights(pd.Series(_y_arr))
+        logger.info("Auto-computed global optimizer weights: %s", auto_weights_by_regime)
+
         results = optimizer.optimize_all_regimes(
             data_by_regime=data_by_regime,
             models_by_regime=models_by_regime,
-            class_weights_by_regime=REGIME_CLASS_WEIGHTS,
+            class_weights_by_regime=auto_weights_by_regime,
         )
 
         if not results:

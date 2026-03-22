@@ -69,8 +69,8 @@ class Settings(BaseSettings):
     DISCORD_WEBHOOK_URL: str | None = None
     DISCORD_TRADING_URL: str | None = None  # 거래 전용 알림
 
-    # Phase L.2: Dual-Timeframe Entry Layer
-    DUAL_TIMEFRAME_ENABLED: bool = False  # Feature flag — enable 15min entry timing
+    # Dual-Timeframe Entry Layer
+    DUAL_TIMEFRAME_ENABLED: bool = True  # Feature flag — enable 15min entry timing
 
     model_config = SettingsConfigDict(
         env_file=".env",

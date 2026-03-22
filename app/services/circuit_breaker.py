@@ -112,8 +112,8 @@ class CircuitBreaker:
         self._opened_at: datetime | None = None
         self._consecutive_failures = 0
         self._consecutive_losses = 0
-        self._daily_pnl: dict[date, float] = {}
-        self._daily_trade_count: dict[date, int] = {}
+        # daily_pnl and daily_trade_count are read from Redis
+        # (RiskManager is the authoritative source via risk:daily_pnl:{date} and risk:daily_trades:{date})
         self._api_latencies: list = []
         self._half_open_trade_count = 0
 
@@ -189,6 +189,28 @@ class CircuitBreaker:
             )
         except Exception as e:
             logger.warning("Circuit Breaker 상태 저장 실패: %s", str(e))
+
+    def _get_daily_pnl(self) -> float:
+        """Read today's P&L from Redis (written by RiskManager)."""
+        today_str = date.today().isoformat()
+        try:
+            raw = cache.get(f"risk:daily_pnl:{today_str}")
+            if raw is not None:
+                return float(raw)
+        except Exception:
+            pass
+        return 0.0
+
+    def _get_daily_trade_count(self) -> int:
+        """Read today's trade count from Redis (written by RiskManager)."""
+        today_str = date.today().isoformat()
+        try:
+            raw = cache.get(f"risk:daily_trades:{today_str}")
+            if raw is not None:
+                return int(raw)
+        except Exception:
+            pass
+        return 0
 
     @property
     def state(self) -> CircuitState:
@@ -324,9 +346,7 @@ class CircuitBreaker:
                     return False
 
         # 일일 거래 횟수 한도 확인 (소프트 한도 — OPEN 전환 없이 차단)
-        today = date.today()
-        with self._lock:
-            daily_count = self._daily_trade_count.get(today, 0)
+        daily_count = self._get_daily_trade_count()
         if daily_count >= self.max_trades_per_day:
             logger.warning(
                 "일일 거래 횟수 한도 도달: %d/%d — 트레이딩 차단",
@@ -336,7 +356,7 @@ class CircuitBreaker:
 
         # 일일 손실 한도 확인
         if portfolio_value:
-            daily_loss = self._daily_pnl.get(today, 0.0)
+            daily_loss = self._get_daily_pnl()
             loss_pct = abs(daily_loss) / portfolio_value if portfolio_value > 0 else 0
 
             if daily_loss < 0 and (
@@ -372,17 +392,8 @@ class CircuitBreaker:
             pnl: 실현 손익 (USD)
         """
         with self._lock:
-            today = date.today()
-
-            # 손익 기록
-            if today not in self._daily_pnl:
-                self._daily_pnl[today] = 0.0
-            self._daily_pnl[today] += pnl
-
-            # 일일 거래 횟수 기록 (성공/실패 무관)
-            if today not in self._daily_trade_count:
-                self._daily_trade_count[today] = 0
-            self._daily_trade_count[today] += 1
+            # daily_pnl and daily_trade_count are managed by RiskManager
+            # CircuitBreaker reads from Redis via _get_daily_pnl() / _get_daily_trade_count()
 
             if success:
                 self._consecutive_failures = 0
@@ -464,14 +475,13 @@ class CircuitBreaker:
             consecutive_losses, daily_pnl, daily_trade_count,
             avg_latency_ms, config)
         """
-        today = date.today()
         return {
             "state": self.state.value,
             "opened_at": self._opened_at.isoformat() if self._opened_at else None,
             "consecutive_failures": self._consecutive_failures,
             "consecutive_losses": self._consecutive_losses,
-            "daily_pnl": self._daily_pnl.get(today, 0.0),
-            "daily_trade_count": self._daily_trade_count.get(today, 0),
+            "daily_pnl": self._get_daily_pnl(),
+            "daily_trade_count": self._get_daily_trade_count(),
             "avg_latency_ms": (
                 sum(self._api_latencies) / len(self._api_latencies)
                 if self._api_latencies else 0
