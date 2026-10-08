@@ -1,0 +1,10 @@
+{
+  // Ruff가 lint 담당
+  "ruff.lint.enable": true,
+
+  // Pylance의 lint 성격 경고 끄기
+  "python.analysis.diagnosticMode": "openFilesOnly",
+  "python.analysis.typeCheckingMode": "basic",
+
+  "github.copilot.chat.anthropic.thinking.effort": "high"
+}

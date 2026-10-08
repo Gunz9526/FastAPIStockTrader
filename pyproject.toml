@@ -1,85 +1,39 @@
-[project]
-name = "fastapi-stock-trader"
-version = "0.1.0"
-description = "High-Frequency Stock Trading Platform using FastAPI and TimescaleDB"
-authors = [
-    { name = "gunz"}
-]
-requires-python = "==3.14.*"
-dependencies = [
-    "fastapi>=0.128.0",
-    "uvicorn[standard]>=0.40.0",
-    "sqlalchemy>=2.0.46",
-    "alembic>=1.18.1",
-    "asyncpg>=0.31.0",
-    "psycopg2>=2.9.11",
-    "pydantic>=2.12.5",
-    "pydantic-settings>=2.12.0",
-    "redis>=7.1.0",
-    "celery>=5.6.2",
-    "python-json-logger>=4.0.0",
-    "httpx>=0.28.1",
-    "requests>=2.32.5",
-    "pandas>=3.0.0",
-    "numpy>=2.4.1",
-    "scipy>=1.17.0",
-    "scikit-learn>=1.8.0",
-    # ML & Strategy
-    "catboost>=1.2.8",
-    "lightgbm>=4.6.0",
-    "xgboost>=3.1.3",
-    "optuna>=4.7.0",
-    "joblib>=1.5.3",
-    "ta-lib>=0.6.8",
-    "matplotlib>=3.10.8",
-    # Alpaca
-    "alpaca-py>=0.43.2",
-    # Monitoring
-    "prometheus-fastapi-instrumentator>=7.1.0",
-    # Data
-    "yfinance>=1.0",
-    "finnhub-python>=2.4.26",
-    # Utils
-    "slowapi>=0.1.9",
-    "backtrader==1.9.78.123",
-    "google-genai>=1.60.0",
-    "flower>=2.0.1",
-    "shap>=0.50.0",
-]
-
-[tool.setuptools]
-packages = ["app"]
-
-[project.optional-dependencies]
-dev = [
-    "pytest>=9.0.2",
-    "pytest-asyncio>=1.3.0",
-    "ruff>=0.2.0",
-    "mypy>=1.8.0",
-    "black>=24.0.0",
-]
-
 [build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
 
-[tool.ruff]
-line-length = 120
-target-version = "py314"
-lint.select = ["E", "F", "I", "W", "C90", "B", "UP", "SIM"]
-exclude = [
-    ".git",
-    ".venv",
-    "node_modules",
+[project]
+name = "stock-trader"
+version = "0.1.0"
+description = "Recoverable CPU-only Alpaca paper equity trader"
+requires-python = "==3.14.2"
+dependencies = [
+  "fastapi>=0.135,<1", "uvicorn>=0.34,<1", "pydantic-settings>=2.8,<3",
+  "httpx>=0.28,<1", "websockets>=15,<17", "psycopg[binary,pool]>=3.2,<4",
+  "numpy>=2.3,<3", "pandas>=2.3,<4", "pyarrow>=20,<30",
+  "lightgbm>=4.6,<5", "scikit-learn>=1.7,<2", "xgboost-cpu>=3.4,<4", "catboost>=1.2.10,<2",
 ]
 
-[tool.mypy]
-python_version = "3.14"
-strict = true
-ignore_missing_imports = true
+[project.scripts]
+stock-trader = "stock_trader.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8.3,<10", "pytest-asyncio>=0.26,<2", "ruff>=0.11,<1"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/stock_trader"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-python_files = ["test_*.py"]
-log_cli = true
+
+[tool.ruff]
+target-version = "py314"
+line-length = 110
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["stock_trader"]
