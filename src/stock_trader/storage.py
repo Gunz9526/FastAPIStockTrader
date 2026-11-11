@@ -28,6 +28,9 @@ CREATE TABLE IF NOT EXISTS controls (
   state text NOT NULL DEFAULT 'pending', result jsonb,
   created_at timestamptz NOT NULL DEFAULT now(), completed_at timestamptz
 );
+ALTER TABLE controls ADD COLUMN IF NOT EXISTS payload jsonb NOT NULL DEFAULT '{}';
+ALTER TABLE controls ADD COLUMN IF NOT EXISTS request_key text;
+CREATE UNIQUE INDEX IF NOT EXISTS controls_request_key ON controls(request_key);
 CREATE TABLE IF NOT EXISTS alerts (
   key text PRIMARY KEY, content text NOT NULL, state text NOT NULL DEFAULT 'pending',
   attempts integer NOT NULL DEFAULT 0, next_attempt timestamptz NOT NULL DEFAULT now(),
@@ -38,6 +41,7 @@ CREATE TABLE IF NOT EXISTS audit (
   payload jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT now()
 );
 INSERT INTO schema_version(version) VALUES(1) ON CONFLICT DO NOTHING;
+INSERT INTO schema_version(version) VALUES(2) ON CONFLICT DO NOTHING;
 """
 
 

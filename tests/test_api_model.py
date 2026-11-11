@@ -63,7 +63,7 @@ def test_api_requires_auth_and_never_returns_secrets(settings):
             client.post(
                 "/controls", json={"command": "flatten"}, headers={"Authorization": "Bearer test-only-token"}
             ).status_code
-            == 202
+            == 422
         )
 
 
